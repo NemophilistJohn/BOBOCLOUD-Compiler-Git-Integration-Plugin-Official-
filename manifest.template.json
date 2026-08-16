@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "id": "bobocloud.local-scm",
+  "displayName": "BOBOCloud Local Source Control",
+  "description": "Official local-workspace source-control integration. It does not inspect or modify cloud workspaces.",
+  "version": "1.0.0",
+  "engines": {
+    "bobocloud": ">=2.6.0 <3.0.0",
+    "pluginApi": "^1.2.0"
+  },
+  "main": "dist/extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "permissions": [
+    "commands.register",
+    "sourceControl.register",
+    "fileDecorations.scm",
+    "scm.git.read",
+    "scm.git.write"
+  ],
+  "contributes": {},
+  "localization": {
+    "default": "locales/en.json",
+    "en": "locales/en.json",
+    "zh-CN": "locales/zh-CN.json",
+    "ja": "locales/ja.json"
+  },
+  "integrity": {
+    "algorithm": "sha256",
+    "files": {}
+  }
+}
