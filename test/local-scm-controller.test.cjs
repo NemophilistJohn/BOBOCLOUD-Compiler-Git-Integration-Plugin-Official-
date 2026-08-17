@@ -27,7 +27,9 @@ function commandIds() {
     refresh: prefix + 'refresh',
     initialize: prefix + 'initialize',
     clone: prefix + 'clone',
+    publish: prefix + 'publish',
     stage: prefix + 'stage',
+    stageAll: prefix + 'stageAll',
     unstage: prefix + 'unstage',
     commit: prefix + 'commit',
     fetch: prefix + 'fetch',
@@ -123,6 +125,7 @@ function readyBroker(options = {}) {
       };
     },
     async stage(args) { calls.push(['stage', args]); return status(args); },
+    async stageAll(args) { calls.push(['stageAll', args]); return status(args); },
     async unstage(args) { calls.push(['unstage', args]); return status(args); },
     async commit(args) { calls.push(['commit', args]); return { repositoryId: REPOSITORY_ID, commit: 'a'.repeat(40) }; },
     async fetch(args) { calls.push(['fetch', args]); return { repositoryId: REPOSITORY_ID, remote: 'origin', branch: 'main', output: '' }; },
@@ -132,6 +135,7 @@ function readyBroker(options = {}) {
     async createBranch(args) { calls.push(['createBranch', args]); return { repositoryId: REPOSITORY_ID, branch: args.name, checkedOut: args.checkout }; },
     async deleteBranch(args) { calls.push(['deleteBranch', args]); return { repositoryId: REPOSITORY_ID, branch: args.name, deleted: true }; },
     async init() { calls.push(['init']); return descriptor; },
+    async setRemote(args) { calls.push(['setRemote', args]); return { repositoryId: REPOSITORY_ID, name: args.name, url: args.url }; },
     async clone(args) { calls.push(['clone', args]); return descriptor; }
   };
   return broker;
@@ -175,6 +179,54 @@ test('empty-workspace fixture produces an initialize-or-clone local-only state',
   assert.equal(state.actions.some((item) => item.id === 'initialize'), true);
   assert.equal(state.actions.some((item) => item.id === 'clone'), true);
   assert.equal(decorationClears.length > 0, true);
+});
+
+test('an unborn local repository is ready for its first publish instead of failing history', async () => {
+  const git = readyBroker();
+  const originalStatus = git.status;
+  const originalHistory = git.history;
+  let published = false;
+  git.status = async (args) => {
+    const result = await originalStatus(args);
+    result.branch = published
+      ? { head: 'main', upstream: 'origin/main', ahead: 0, behind: 0, oid: 'a'.repeat(40) }
+      : { head: 'master', upstream: '', ahead: 0, behind: 0, oid: '(initial)' };
+    return result;
+  };
+  git.history = async (args) => {
+    if (!published) {
+      git.calls.push(['history', args]);
+      return { repositoryId: REPOSITORY_ID, commits: [], offset: args.offset || 0, limit: args.limit || 30, hasMore: false, nextOffset: null };
+    }
+    return originalHistory(args);
+  };
+  git.push = async (args) => {
+    git.calls.push(['push', args]);
+    published = true;
+    return { repositoryId: REPOSITORY_ID, remote: 'origin', branch: 'main', output: '' };
+  };
+  const { controller, snapshots } = createHarness(git, 'en');
+  await controller.start();
+  const unborn = snapshots.at(-1);
+
+  assert.equal(unborn.phase, 'ready');
+  assert.match(unborn.message, /no commits yet/);
+  assert.deepEqual(section(unborn, 'history').items, []);
+  assert.equal(unborn.actions.find((item) => item.id === 'publish').placement, 'button');
+  assert.equal(unborn.actions.find((item) => item.id === 'stageAll').placement, 'toolbar');
+
+  const result = await controller.publishInitial({
+    remote: 'https://github.com/example/empty.git',
+    branch: 'main',
+    message: 'Initial project'
+  });
+  assert.equal(result.ok, true);
+  assert.deepEqual(
+    git.calls.filter(([method]) => ['createBranch', 'stageAll', 'commit', 'setRemote', 'push'].includes(method)).map(([method]) => method),
+    ['createBranch', 'stageAll', 'commit', 'setRemote', 'push']
+  );
+  assert.equal(snapshots.at(-1).phase, 'ready');
+  assert.equal(snapshots.at(-1).summary.items.find((item) => item.label === 'Repository address').value, 'https://example.invalid/project.git');
 });
 
 test('unavailable Git presents a refreshable localized error state', async () => {

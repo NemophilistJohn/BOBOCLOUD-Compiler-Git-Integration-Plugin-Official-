@@ -8,7 +8,7 @@ reads, writes, or synchronizes a cloud workspace.
 
 The versioned installable artifact is kept at:
 
-`artifacts/bobocloud.local-scm-1.1.1.boboplugin`
+`artifacts/bobocloud.local-scm-1.2.0.boboplugin`
 
 Build and verify it from this directory:
 
@@ -48,11 +48,19 @@ state and Refresh. In Chinese this is: `当前无 Git 环境，请安装 Git 并
   local workspace.
 - View staged, unstaged, untracked, and conflicted files, including bounded
   `+N -N` line statistics when the broker can safely provide them.
-- Stage or unstage individual files, commit, fetch, pull, and push.
+- For a local repository without a first commit, show an explicit **Initialize
+  and publish** flow: choose the remote HTTPS/SSH address, initial branch, and
+  first commit message; the broker then stages the workspace, commits, sets
+  `origin`, and pushes with upstream tracking.
+- Stage individual files or all local changes, commit, fetch, pull, and push.
 - Create, delete, and check out local branches.
 - Load status and history through bounded `offset` / `nextOffset` pagination.
 - Publish data-only static file decorations for local SCM state, with an
   immediate Show/Hide toggle in the source-control sidebar.
+
+The sidebar keeps common actions in a compact host-owned icon toolbar. Less
+frequent repository operations are in the host **More** menu; the package does
+not inject its own SVG, CSS, or DOM.
 
 ## Localization And Permissions
 

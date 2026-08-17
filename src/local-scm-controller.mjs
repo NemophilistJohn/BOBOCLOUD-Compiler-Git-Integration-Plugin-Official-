@@ -198,6 +198,8 @@ export function classifyScmError(error, operation = '') {
   const code = errorCode(error);
   if (code === 'SCM_GIT_NO_WORKSPACE') return 'noWorkspace';
   if (code === 'SCM_GIT_UNAVAILABLE') return 'gitUnavailable';
+  if (code === 'SCM_GIT_IDENTITY_REQUIRED') return 'identityRequired';
+  if (code === 'SCM_GIT_NOTHING_TO_COMMIT') return 'nothingToCommit';
   if (operation === 'clone' && code === 'SCM_GIT_WORKSPACE_NOT_EMPTY') return 'workspaceNotEmpty';
   if (operation === 'clone' && (code === 'SCM_GIT_REMOTE_DENIED' || code === 'SCM_GIT_AUTH_REQUIRED' ||
       code === 'SCM_GIT_CLONE_FAILED' || code === 'SCM_GIT_OPERATION_FAILED')) {
@@ -331,6 +333,8 @@ function action(id, title, command, options = {}) {
     description: options.description || undefined,
     command,
     kind: options.kind || 'secondary',
+    placement: options.placement || 'button',
+    icon: options.icon || undefined,
     disabled: options.disabled === true,
     form: options.form || undefined
   };
@@ -447,6 +451,52 @@ export class LocalScmController {
     });
   }
 
+  publishInitial(options = {}) {
+    return this._enqueue(async () => {
+      let remote;
+      let branch;
+      let message;
+      try {
+        const values = plainObject(options) ? options : {};
+        remote = validateRemoteAddress(values.remote);
+        branch = branchName(values.branch || 'main');
+        message = optionalString(values.message, 'Initial commit message', 4096);
+        if (!message) throw new TypeError('Initial commit message is required.');
+      } catch (error) {
+        return this._showNamedError('remoteInvalid', error);
+      }
+      try {
+        await this._setLoading();
+        const detected = await this._requireGitMethod('detect')({ includeNested: true });
+        const repositories = Array.isArray(detected && detected.repositories)
+          ? detected.repositories.map(normalRepository).filter(Boolean)
+          : [];
+        let root = repositories.find((item) => item.isWorkspaceRoot);
+        if (!root) root = normalRepository(await this._requireGitMethod('init')());
+        if (!root) throw new TypeError('The local workspace could not be initialized.');
+        this._activeRepositoryId = root.repositoryId;
+        const status = await this._requireGitMethod('status')({ repositoryId: root.repositoryId, offset: 0, limit: 1 });
+        const branchState = plainObject(status) && plainObject(status.branch) ? status.branch : {};
+        if (branchState.oid !== '(initial)') {
+          const error = new Error('The local repository already has a commit.');
+          error.code = 'SCM_GIT_OPERATION_FAILED';
+          throw error;
+        }
+        if (branchState.head !== branch) {
+          await this._requireGitMethod('createBranch')({ repositoryId: root.repositoryId, name: branch, checkout: true });
+        }
+        await this._requireGitMethod('stageAll')({ repositoryId: root.repositoryId });
+        await this._requireGitMethod('commit')({ repositoryId: root.repositoryId, message });
+        await this._requireGitMethod('setRemote')({ repositoryId: root.repositoryId, name: 'origin', url: remote });
+        await this._requireGitMethod('push')({ repositoryId: root.repositoryId, remote: 'origin', branch, setUpstream: true });
+        await this._refreshAfterMutation();
+        return { ok: true };
+      } catch (error) {
+        return this._showError(error, 'publish');
+      }
+    });
+  }
+
   cloneRemote(value) {
     return this._enqueue(async () => {
       let remote;
@@ -470,6 +520,16 @@ export class LocalScmController {
         return await this._mutateStatusNow('stage', { paths: requestedPaths(paths) });
       } catch (error) {
         return this._showError(error, 'stage');
+      }
+    });
+  }
+
+  stageAll() {
+    return this._enqueue(async () => {
+      try {
+        return await this._mutateStatusNow('stageAll', {});
+      } catch (error) {
+        return this._showError(error, 'stageAll');
       }
     });
   }
@@ -616,7 +676,9 @@ export class LocalScmController {
     if (command === this._commands.refresh) return this.refresh();
     if (command === this._commands.initialize) return this.initializeRepository();
     if (command === this._commands.clone) return this.cloneRemote(values.remote);
+    if (command === this._commands.publish) return this.publishInitial(values);
     if (command === this._commands.commit) return this.commit(values.message);
+    if (command === this._commands.stageAll) return this.stageAll();
     if (command === this._commands.fetch) return this.fetch(values);
     if (command === this._commands.pull) return this.pull(values);
     if (command === this._commands.push) return this.push(values);
@@ -843,8 +905,12 @@ export class LocalScmController {
         ? ['state.remoteInvalid.title', 'state.remoteInvalid.message']
       : kind === 'remoteFailed'
           ? ['state.remoteFailed.title', 'state.remoteFailed.message']
-          : kind === 'workspaceNotEmpty'
+      : kind === 'workspaceNotEmpty'
             ? ['state.workspaceNotEmpty.title', 'state.workspaceNotEmpty.message']
+          : kind === 'identityRequired'
+            ? ['state.identityRequired.title', 'state.identityRequired.message']
+          : kind === 'nothingToCommit'
+            ? ['state.nothingToCommit.title', 'state.nothingToCommit.message']
           : ['state.operationFailed.title', 'state.operationFailed.message'];
   }
 
@@ -894,10 +960,19 @@ export class LocalScmController {
           items: [{ label: this._t('summary.scope'), value: this._t('notice.localOnly') }]
         },
         actions: [
-          action('refresh', this._t('action.refresh'), this._commands.refresh),
-          action('initialize', this._t('action.initialize'), this._commands.initialize, { kind: 'secondary' }),
-          action('clone', this._t('action.clone'), this._commands.clone, {
+          action('refresh', this._t('action.refresh'), this._commands.refresh, { placement: 'toolbar', icon: 'refresh' }),
+          action('publish', this._t('action.publish'), this._commands.publish, {
             kind: 'primary',
+            form: form(this._t('form.publish.title'), this._t('action.publish'), [
+              textField('remote', this._t('field.remote'), { required: true, maxLength: 2048 }),
+              textField('branch', this._t('field.branch'), { required: true, value: 'main', maxLength: 120 }),
+              textField('message', this._t('field.initialCommitMessage'), { type: 'textarea', required: true, value: this._t('field.initialCommitDefault'), maxLength: 4096 })
+            ])
+          }),
+          action('initialize', this._t('action.initialize'), this._commands.initialize, { placement: 'menu', icon: 'stage-all' }),
+          action('clone', this._t('action.clone'), this._commands.clone, {
+            placement: 'menu',
+            icon: 'remote',
             form: form(this._t('form.clone.title'), this._t('action.clone'), [
               textField('remote', this._t('field.remote'), { required: true, maxLength: 2048 })
             ])
@@ -999,16 +1074,83 @@ export class LocalScmController {
 
     const branch = status.branch || {};
     const remote = Array.isArray(this._remotes && this._remotes.remotes) && this._remotes.remotes[0];
+    const isUnborn = branch.oid === '(initial)';
+    const publishAction = action('publish', this._t('action.publish'), this._commands.publish, {
+      kind: 'primary',
+      placement: isUnborn ? 'button' : 'menu',
+      icon: 'publish',
+      form: form(this._t('form.publish.title'), this._t('action.publish'), [
+        textField('remote', this._t('field.remote'), { required: true, maxLength: 2048 }),
+        textField('branch', this._t('field.branch'), { required: true, value: branch.head || 'main', maxLength: 120 }),
+        textField('message', this._t('field.initialCommitMessage'), { type: 'textarea', required: true, value: this._t('field.initialCommitDefault'), maxLength: 4096 })
+      ])
+    });
+    const readyActions = isUnborn
+      ? [
+        action('refresh', this._t('action.refresh'), this._commands.refresh, { placement: 'toolbar', icon: 'refresh' }),
+        action('stageAll', this._t('action.stageAll'), this._commands.stageAll, { placement: 'toolbar', icon: 'stage-all' }),
+        publishAction,
+        action('toggleDecorations', this._t(this._decorationsEnabled ? 'action.hideDecorations' : 'action.showDecorations'), this._commands.toggleDecorations, { placement: 'menu', icon: 'visibility' }),
+        action('createBranch', this._t('action.createBranch'), this._commands.createBranch, {
+          placement: 'menu', icon: 'branch',
+          form: form(this._t('form.createBranch.title'), this._t('action.createBranch'), [
+            textField('name', this._t('field.branch'), { required: true, maxLength: 120 }),
+            checkboxField('checkout', this._t('field.checkoutAfterCreate'), true)
+          ])
+        })
+      ]
+      : [
+        action('refresh', this._t('action.refresh'), this._commands.refresh, { placement: 'toolbar', icon: 'refresh' }),
+        action('stageAll', this._t('action.stageAll'), this._commands.stageAll, { placement: 'toolbar', icon: 'stage-all' }),
+        action('commit', this._t('action.commit'), this._commands.commit, {
+          kind: 'primary', placement: 'toolbar', icon: 'commit',
+          form: form(this._t('form.commit.title'), this._t('action.commit'), [
+            textField('message', this._t('field.commitMessage'), { type: 'textarea', required: true, maxLength: 4096 })
+          ])
+        }),
+        action('pull', this._t('action.pull'), this._commands.pull, {
+          placement: 'menu', icon: 'pull',
+          form: form(this._t('form.pull.title'), this._t('action.pull'), [
+            textField('remote', this._t('field.remote'), { maxLength: 64 }),
+            textField('branch', this._t('field.branch'), { maxLength: 120 })
+          ])
+        }),
+        action('push', this._t('action.push'), this._commands.push, {
+          placement: 'menu', icon: 'push',
+          form: form(this._t('form.push.title'), this._t('action.push'), [
+            textField('remote', this._t('field.remote'), { maxLength: 64 }),
+            textField('branch', this._t('field.branch'), { maxLength: 120 }),
+            checkboxField('force', this._t('field.force')),
+            checkboxField('setUpstream', this._t('field.setUpstream'))
+          ])
+        }),
+        action('toggleDecorations', this._t(this._decorationsEnabled ? 'action.hideDecorations' : 'action.showDecorations'), this._commands.toggleDecorations, { placement: 'menu', icon: 'visibility' }),
+        action('fetch', this._t('action.fetch'), this._commands.fetch, { placement: 'menu', icon: 'pull', form: form(this._t('form.fetch.title'), this._t('action.fetch'), [textField('remote', this._t('field.remote'), { maxLength: 64 })]) }),
+        action('checkout', this._t('action.checkout'), this._commands.checkout, { placement: 'menu', icon: 'branch', form: form(this._t('form.checkout.title'), this._t('action.checkout'), [textField('branch', this._t('field.branch'), { required: true, maxLength: 120 }), checkboxField('force', this._t('field.force'))]) }),
+        action('createBranch', this._t('action.createBranch'), this._commands.createBranch, { placement: 'menu', icon: 'branch', form: form(this._t('form.createBranch.title'), this._t('action.createBranch'), [textField('name', this._t('field.branch'), { required: true, maxLength: 120 }), checkboxField('checkout', this._t('field.checkoutAfterCreate'), true)]) }),
+        action('deleteBranch', this._t('action.deleteBranch'), this._commands.deleteBranch, {
+          kind: 'danger',
+          placement: 'menu',
+          icon: 'branch',
+          form: form(this._t('form.deleteBranch.title'), this._t('action.deleteBranch'), [
+            textField('name', this._t('field.branch'), { required: true, maxLength: 120 }),
+            checkboxField('force', this._t('field.force'))
+          ])
+        })
+      ];
     return {
       phase: 'ready',
       title: this._t('activity.title'),
-      message: this._error
+      message: isUnborn
+        ? this._t('state.unborn.message')
+        : this._error
         ? this._t(this._errorContent(this._error.kind || 'operationFailed')[1])
         : undefined,
       summary: {
         title: this._t('state.ready'),
         items: [
           { label: this._t('summary.branch'), value: displayText(branch.head, 256, '-') },
+          { label: this._t('summary.remote'), value: displayText(remote && remote.urls && remote.urls[0], 256, '-') },
           { label: this._t('summary.upstream'), value: displayText(branch.upstream || (remote && remote.name), 256, '-') },
           { label: this._t('summary.ahead'), value: String(Number(branch.ahead) || 0) },
           { label: this._t('summary.behind'), value: String(Number(branch.behind) || 0) },
@@ -1017,54 +1159,7 @@ export class LocalScmController {
         ]
       },
       sections,
-      actions: [
-        action('refresh', this._t('action.refresh'), this._commands.refresh),
-        action('toggleDecorations', this._t(this._decorationsEnabled ? 'action.hideDecorations' : 'action.showDecorations'), this._commands.toggleDecorations),
-        action('commit', this._t('action.commit'), this._commands.commit, {
-          kind: 'primary',
-          form: form(this._t('form.commit.title'), this._t('action.commit'), [
-            // API 1.2 revalidates form fields at the host boundary and caps
-            // textarea values at 4096 characters.
-            textField('message', this._t('field.commitMessage'), { type: 'textarea', required: true, maxLength: 4096 })
-          ])
-        }),
-        action('fetch', this._t('action.fetch'), this._commands.fetch, {
-          form: form(this._t('form.fetch.title'), this._t('action.fetch'), [textField('remote', this._t('field.remote'), { maxLength: 64 })])
-        }),
-        action('pull', this._t('action.pull'), this._commands.pull, {
-          form: form(this._t('form.pull.title'), this._t('action.pull'), [
-            textField('remote', this._t('field.remote'), { maxLength: 64 }),
-            textField('branch', this._t('field.branch'), { maxLength: 120 })
-          ])
-        }),
-        action('push', this._t('action.push'), this._commands.push, {
-          form: form(this._t('form.push.title'), this._t('action.push'), [
-            textField('remote', this._t('field.remote'), { maxLength: 64 }),
-            textField('branch', this._t('field.branch'), { maxLength: 120 }),
-            checkboxField('force', this._t('field.force')),
-            checkboxField('setUpstream', this._t('field.setUpstream'))
-          ])
-        }),
-        action('checkout', this._t('action.checkout'), this._commands.checkout, {
-          form: form(this._t('form.checkout.title'), this._t('action.checkout'), [
-            textField('branch', this._t('field.branch'), { required: true, maxLength: 120 }),
-            checkboxField('force', this._t('field.force'))
-          ])
-        }),
-        action('createBranch', this._t('action.createBranch'), this._commands.createBranch, {
-          form: form(this._t('form.createBranch.title'), this._t('action.createBranch'), [
-            textField('name', this._t('field.branch'), { required: true, maxLength: 120 }),
-            checkboxField('checkout', this._t('field.checkoutAfterCreate'), true)
-          ])
-        }),
-        action('deleteBranch', this._t('action.deleteBranch'), this._commands.deleteBranch, {
-          kind: 'danger',
-          form: form(this._t('form.deleteBranch.title'), this._t('action.deleteBranch'), [
-            textField('name', this._t('field.branch'), { required: true, maxLength: 120 }),
-            checkboxField('force', this._t('field.force'))
-          ])
-        })
-      ]
+      actions: readyActions
     };
   }
 
