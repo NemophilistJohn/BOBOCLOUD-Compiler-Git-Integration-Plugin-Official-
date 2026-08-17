@@ -8,7 +8,7 @@ reads, writes, or synchronizes a cloud workspace.
 
 The versioned installable artifact is kept at:
 
-`artifacts/bobocloud.local-scm-1.0.0.boboplugin`
+`artifacts/bobocloud.local-scm-1.1.0.boboplugin`
 
 Build and verify it from this directory:
 
@@ -24,8 +24,9 @@ against the integrity manifest. The unpacked `plugin/` directory is generated
 and ignored; `artifacts/` contains the intentionally versioned installable
 file.
 
-Install the archive through BOBOCloud's Extensions view. Enable it and approve
-the requested local source-control permissions before it can access Git.
+Install the archive through BOBOCloud's Extensions view. BOBOCloud enables the
+declared local source-control permissions by default; each permission remains
+individually revocable from the extension detail tab.
 
 ## Requirements And Boundary
 
@@ -50,7 +51,8 @@ state and Refresh. In Chinese this is: `当前无 Git 环境，请安装 Git 并
 - Stage or unstage individual files, commit, fetch, pull, and push.
 - Create, delete, and check out local branches.
 - Load status and history through bounded `offset` / `nextOffset` pagination.
-- Publish data-only static file decorations for local SCM state.
+- Publish data-only static file decorations for local SCM state, with an
+  immediate Show/Hide toggle in the source-control sidebar.
 
 ## Localization And Permissions
 
@@ -66,6 +68,7 @@ The manifest requests only these host permissions:
 - `scm.git.read`
 - `scm.git.write`
 
-The host presents these permissions for explicit consent. Repository IDs and
-file-operation targets remain in Worker-owned state; the rendered host gets
-only bounded, data-only source-control state.
+The host uses these declarations as the package's capability ceiling, enables
+them after verified installation, and lets the user revoke them later.
+Repository IDs and file-operation targets remain in Worker-owned state; the
+rendered host gets only bounded, data-only source-control state.

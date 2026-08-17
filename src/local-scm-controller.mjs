@@ -369,6 +369,7 @@ export class LocalScmController {
     this._historyNextOffset = 0;
     this._error = null;
     this._itemTargets = new Map();
+    this._decorationsEnabled = options.decorationsEnabled !== false;
   }
 
   get state() {
@@ -577,6 +578,16 @@ export class LocalScmController {
     });
   }
 
+  toggleDecorations(enabled) {
+    return this._enqueue(async () => {
+      this._decorationsEnabled = typeof enabled === 'boolean' ? enabled : !this._decorationsEnabled;
+      if (this._decorationsEnabled) await this._publishDecorations();
+      else await this._clearDecorations();
+      await this._emit();
+      return { ok: true, enabled: this._decorationsEnabled };
+    });
+  }
+
   /**
    * The source-control host only returns a bounded action envelope. Targets
    * such as repository ids and repository-relative paths stay in this Worker
@@ -613,6 +624,7 @@ export class LocalScmController {
     if (command === this._commands.deleteBranch) return this.deleteBranch(values.name, values.force === true);
     if (command === this._commands.loadMoreChanges) return this.loadMoreChanges();
     if (command === this._commands.loadMoreHistory) return this.loadMoreHistory();
+    if (command === this._commands.toggleDecorations) return this.toggleDecorations();
     return Promise.resolve({ ok: false, ignored: true });
   }
 
@@ -794,6 +806,15 @@ export class LocalScmController {
   }
 
   async _showError(error, operation) {
+    const canPreserveRepository = Boolean(this._activeRepositoryId && this._status) &&
+      operation !== 'refresh' && operation !== 'select' && operation !== 'status' &&
+      operation !== 'history' && operation !== 'init' && operation !== 'clone';
+    if (canPreserveRepository) {
+      this._phase = LocalScmPhase.READY;
+      this._error = this._errorState(classifyScmError(error, operation), error);
+      await this._emit();
+      return { ok: false, error };
+    }
     return this._showNamedError(classifyScmError(error, operation), error);
   }
 
@@ -814,7 +835,7 @@ export class LocalScmController {
   }
 
   async _publishDecorations() {
-    if (!this._decorations || typeof this._decorations.set !== 'function') return;
+    if (!this._decorationsEnabled || !this._decorations || typeof this._decorations.set !== 'function') return;
     await this._decorations.set(Array.from(this._decorationEntries.values()));
   }
 
@@ -967,6 +988,9 @@ export class LocalScmController {
     return {
       phase: 'ready',
       title: this._t('activity.title'),
+      message: this._error
+        ? this._t(this._errorContent(this._error.kind || 'operationFailed')[1])
+        : undefined,
       summary: {
         title: this._t('state.ready'),
         items: [
@@ -974,12 +998,14 @@ export class LocalScmController {
           { label: this._t('summary.upstream'), value: displayText(branch.upstream || (remote && remote.name), 256, '-') },
           { label: this._t('summary.ahead'), value: String(Number(branch.ahead) || 0) },
           { label: this._t('summary.behind'), value: String(Number(branch.behind) || 0) },
+          { label: this._t('summary.fileDecorations'), value: this._t(this._decorationsEnabled ? 'state.enabled' : 'state.disabled') },
           { label: this._t('summary.scope'), value: this._t('notice.localOnly') }
         ]
       },
       sections,
       actions: [
         action('refresh', this._t('action.refresh'), this._commands.refresh),
+        action('toggleDecorations', this._t(this._decorationsEnabled ? 'action.hideDecorations' : 'action.showDecorations'), this._commands.toggleDecorations),
         action('commit', this._t('action.commit'), this._commands.commit, {
           kind: 'primary',
           form: form(this._t('form.commit.title'), this._t('action.commit'), [

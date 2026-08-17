@@ -116,6 +116,7 @@ test('worker entry registers only host-rendered local SCM state and responds to 
   assert.equal(harness.snapshots.at(-1).phase, 'empty');
   assert.equal(harness.commands.has(COMMAND_PREFIX + 'clone'), true);
   assert.equal(harness.commands.has(COMMAND_PREFIX + 'push'), true);
+  assert.equal(harness.commands.has(COMMAND_PREFIX + 'toggleDecorations'), true);
 
   await harness.commands.get(COMMAND_PREFIX + 'clone').handler({
     sourceControlId: SOURCE_CONTROL_ID,
@@ -147,9 +148,11 @@ test('missing local SCM broker is a refresh-only localized Git state, not an act
 });
 
 test('worker source has no DOM, network, child-process, or cloud synchronization implementation', async () => {
-  const source = await fs.readFile(path.join(ROOT, 'src', 'extension.js'), 'utf8');
-  const controller = await fs.readFile(path.join(ROOT, 'src', 'local-scm-controller.mjs'), 'utf8');
-  const combined = source + '\n' + controller;
+  const sourceFiles = await fs.readdir(path.join(ROOT, 'src'));
+  const sources = await Promise.all(sourceFiles.filter((name) => /\.(?:js|mjs)$/.test(name)).map((name) => (
+    fs.readFile(path.join(ROOT, 'src', name), 'utf8')
+  )));
+  const combined = sources.join('\n');
 
   assert.doesNotMatch(combined, /\bdocument\b|\bwindow\b|\bXMLHttpRequest\b|child_process|node:child_process/i);
   assert.doesNotMatch(combined, /\brclone\b|cloud\.(?:request|sync)|remoteSync/i);

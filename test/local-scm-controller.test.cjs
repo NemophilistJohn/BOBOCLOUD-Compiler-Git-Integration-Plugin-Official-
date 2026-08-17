@@ -38,7 +38,8 @@ function commandIds() {
     deleteBranch: prefix + 'deleteBranch',
     selectRepository: prefix + 'selectRepository',
     loadMoreChanges: prefix + 'loadMoreChanges',
-    loadMoreHistory: prefix + 'loadMoreHistory'
+    loadMoreHistory: prefix + 'loadMoreHistory',
+    toggleDecorations: prefix + 'toggleDecorations'
   });
 }
 
@@ -206,7 +207,7 @@ test('invalid clone address is rejected locally and never becomes a network requ
 
 test('nested repository status uses broker offsets, preserves groups, and publishes only workspace-relative decorations', async () => {
   const git = readyBroker();
-  const { controller, snapshots, decorationSets } = createHarness(git);
+  const { controller, snapshots, decorationSets, decorationClears } = createHarness(git);
   await controller.start();
   await controller.loadMoreChanges();
   await controller.loadMoreChanges();
@@ -235,6 +236,17 @@ test('nested repository status uses broker offsets, preserves groups, and publis
   assert.equal(section(state, 'unstaged').items[0].meta, '+1 -0');
   assert.equal(section(state, 'untracked').items[0].meta, '?');
   assert.equal(state.actions.find((item) => item.id === 'commit').form.fields[0].maxLength, 4096);
+  assert.equal(state.summary.items.find((item) => item.label === 'File tree status').value, 'On');
+  assert.equal(state.actions.find((item) => item.id === 'toggleDecorations').title, 'Hide file tree status');
+
+  const clearsBeforeToggle = decorationClears.length;
+  await controller.handleCommand(commandIds().toggleDecorations, {});
+  assert.equal(decorationClears.length, clearsBeforeToggle + 1);
+  assert.equal(snapshots.at(-1).summary.items.find((item) => item.label === 'File tree status').value, 'Off');
+  const setsBeforeEnable = decorationSets.length;
+  await controller.handleCommand(commandIds().toggleDecorations, {});
+  assert.equal(decorationSets.length, setsBeforeEnable + 1);
+  assert.equal(snapshots.at(-1).actions.find((item) => item.id === 'toggleDecorations').title, 'Hide file tree status');
 
   await controller.stage(['src/app.js']);
   const stageCall = git.calls.find(([method]) => method === 'stage');
@@ -291,6 +303,25 @@ test('ready state preloads the first history page and continues with broker offs
   });
   state = snapshots.at(-1);
   assert.equal(state.phase, 'ready');
+});
+
+test('a failed repository mutation preserves the current status and history context', async () => {
+  const git = readyBroker();
+  git.push = async () => { throw error('SCM_GIT_AUTH_REQUIRED'); };
+  const { controller, snapshots, decorationClears } = createHarness(git, 'zh-CN');
+  await controller.start();
+  const clearsBeforePush = decorationClears.length;
+
+  const result = await controller.push({ remote: 'origin', branch: 'main' });
+  const state = snapshots.at(-1);
+
+  assert.equal(result.ok, false);
+  assert.equal(state.phase, 'ready');
+  assert.equal(state.message, '无法在本地工作区完成该操作。请刷新后重试。');
+  assert.equal(section(state, 'staged').items.length, 1);
+  assert.equal(section(state, 'history').items.length, 2);
+  assert.equal(state.actions.some((item) => item.id === 'push'), true);
+  assert.equal(decorationClears.length, clearsBeforePush);
 });
 
 test('remote clone broker failure exposes a recoverable remote error instead of claiming cloud state', async () => {
