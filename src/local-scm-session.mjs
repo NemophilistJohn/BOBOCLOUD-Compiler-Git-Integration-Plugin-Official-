@@ -81,13 +81,23 @@ export class LocalScmExtensionSession {
     }
   }
 
-  _handleCommand(command, invocation) {
+  async _handleCommand(command, invocation) {
     if (this._disposed || !this._controller) return { ok: false, ignored: true };
     if (invocation && typeof invocation === 'object' && !Array.isArray(invocation) &&
         invocation.sourceControlId && invocation.sourceControlId !== this._sourceControlId) {
       return { ok: false, ignored: true };
     }
-    return this._controller.handleCommand(command, invocation);
+    const result = await this._controller.handleCommand(command, invocation);
+    if (result && result.ok === false && result.error && typeof result.error === 'object') {
+      const failure = new Error(typeof result.error.message === 'string'
+        ? result.error.message
+        : 'Local source-control operation failed.');
+      failure.code = typeof result.error.code === 'string' && result.error.code
+        ? result.error.code
+        : 'SCM_GIT_OPERATION_FAILED';
+      throw failure;
+    }
+    return result;
   }
 
   async dispose() {

@@ -4,6 +4,8 @@
   "state.empty.title": "ローカルリポジトリがありません",
   "state.empty.message": "このローカルワークスペースを初期化するか、有効なリモートリポジトリを空のワークスペースへクローンできます。",
   "state.ready": "ローカルワークスペースのソース管理",
+  "state.noWorkspace.title": "ローカルワークスペースが開かれていません",
+  "state.noWorkspace.message": "ローカルワークスペースを開いてから、ソース管理を更新してください。",
   "state.gitUnavailable.title": "Git を利用できません",
   "state.gitUnavailable.message": "このデバイスでは Git がインストールされていないか、利用できません。Git をインストールしてから更新してください。",
   "state.remoteInvalid.title": "リモートリポジトリのアドレスが無効です",

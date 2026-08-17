@@ -196,6 +196,7 @@ export function groupStatusChanges(changes) {
 
 export function classifyScmError(error, operation = '') {
   const code = errorCode(error);
+  if (code === 'SCM_GIT_NO_WORKSPACE') return 'noWorkspace';
   if (code === 'SCM_GIT_UNAVAILABLE') return 'gitUnavailable';
   if (operation === 'clone' && code === 'SCM_GIT_WORKSPACE_NOT_EMPTY') return 'workspaceNotEmpty';
   if (operation === 'clone' && (code === 'SCM_GIT_REMOTE_DENIED' || code === 'SCM_GIT_AUTH_REQUIRED' ||
@@ -802,7 +803,7 @@ export class LocalScmController {
     this._error = this._errorState(kind, error);
     await this._clearDecorations();
     await this._emit();
-    return { ok: false, error };
+    return this._commandFailure(kind, error);
   }
 
   async _showError(error, operation) {
@@ -813,9 +814,20 @@ export class LocalScmController {
       this._phase = LocalScmPhase.READY;
       this._error = this._errorState(classifyScmError(error, operation), error);
       await this._emit();
-      return { ok: false, error };
+      return this._commandFailure(this._error.kind, error);
     }
     return this._showNamedError(classifyScmError(error, operation), error);
+  }
+
+  _commandFailure(kind, error) {
+    const content = this._errorContent(kind);
+    return {
+      ok: false,
+      error: {
+        code: errorCode(error) || 'SCM_GIT_OPERATION_FAILED',
+        message: this._t(content[1])
+      }
+    };
   }
 
   _errorState(kind, error) {
@@ -823,7 +835,9 @@ export class LocalScmController {
   }
 
   _errorContent(kind) {
-    return kind === 'gitUnavailable'
+    return kind === 'noWorkspace'
+      ? ['state.noWorkspace.title', 'state.noWorkspace.message']
+      : kind === 'gitUnavailable'
       ? ['state.gitUnavailable.title', 'state.gitUnavailable.message']
       : kind === 'remoteInvalid'
         ? ['state.remoteInvalid.title', 'state.remoteInvalid.message']

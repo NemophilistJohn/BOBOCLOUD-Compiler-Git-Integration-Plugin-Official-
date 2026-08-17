@@ -8,7 +8,7 @@ reads, writes, or synchronizes a cloud workspace.
 
 The versioned installable artifact is kept at:
 
-`artifacts/bobocloud.local-scm-1.1.0.boboplugin`
+`artifacts/bobocloud.local-scm-1.1.1.boboplugin`
 
 Build and verify it from this directory:
 

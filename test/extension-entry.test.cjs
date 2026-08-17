@@ -118,11 +118,15 @@ test('worker entry registers only host-rendered local SCM state and responds to 
   assert.equal(harness.commands.has(COMMAND_PREFIX + 'push'), true);
   assert.equal(harness.commands.has(COMMAND_PREFIX + 'toggleDecorations'), true);
 
-  await harness.commands.get(COMMAND_PREFIX + 'clone').handler({
-    sourceControlId: SOURCE_CONTROL_ID,
-    actionId: 'clone',
-    values: { remote: 'file:outside-workspace' }
-  });
+  await assert.rejects(
+    harness.commands.get(COMMAND_PREFIX + 'clone').handler({
+      sourceControlId: SOURCE_CONTROL_ID,
+      actionId: 'clone',
+      values: { remote: 'file:outside-workspace' }
+    }),
+    (error) => error.code === 'SCM_GIT_OPERATION_FAILED' &&
+      error.message === 'Enter a valid HTTPS or SSH remote repository address, then try again.'
+  );
   assert.equal(harness.snapshots.at(-1).title, 'Remote repository address is invalid');
 
   harness.changeLocale('ja');
@@ -144,6 +148,15 @@ test('missing local SCM broker is a refresh-only localized Git state, not an act
   assert.equal(state.message, '当前无 Git 环境，请安装 Git 并配置 PATH 后刷新。');
   assert.deepEqual(state.actions.map((item) => item.command), [COMMAND_PREFIX + 'refresh']);
   assert.equal(Object.hasOwn(state, 'sections'), false);
+  await assert.rejects(
+    harness.commands.get(COMMAND_PREFIX + 'refresh').handler({
+      sourceControlId: SOURCE_CONTROL_ID,
+      actionId: 'refresh',
+      values: {}
+    }),
+    (error) => error.code === 'SCM_GIT_UNAVAILABLE' &&
+      error.message === '当前无 Git 环境，请安装 Git 并配置 PATH 后刷新。'
+  );
   await activation.dispose();
 });
 

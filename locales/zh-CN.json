@@ -4,6 +4,8 @@
   "state.empty.title": "未检测到本地仓库",
   "state.empty.message": "可以初始化此本地工作区，或将有效的远程仓库克隆到空工作区中。",
   "state.ready": "本地工作区源代码管理",
+  "state.noWorkspace.title": "尚未打开本地工作区",
+  "state.noWorkspace.message": "请先打开本地工作区，然后刷新源代码管理。",
   "state.gitUnavailable.title": "Git 不可用",
   "state.gitUnavailable.message": "当前无 Git 环境，请安装 Git 并配置 PATH 后刷新。",
   "state.remoteInvalid.title": "远程仓库地址无效",

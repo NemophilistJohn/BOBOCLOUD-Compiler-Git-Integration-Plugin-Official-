@@ -184,12 +184,33 @@ test('unavailable Git presents a refreshable localized error state', async () =>
   const state = snapshots.at(-1);
 
   assert.equal(result.ok, false);
+  assert.deepEqual(result.error, {
+    code: 'SCM_GIT_UNAVAILABLE',
+    message: '当前无 Git 环境，请安装 Git 并配置 PATH 后刷新。'
+  });
+  assert.equal(Object.getPrototypeOf(result.error), Object.prototype);
   assert.equal(state.phase, 'error');
   assert.equal(state.title, 'Git 不可用');
   assert.equal(state.message, '当前无 Git 环境，请安装 Git 并配置 PATH 后刷新。');
   assert.deepEqual(state.actions.map((item) => item.command), ['bobocloud.local-scm.refresh']);
   assert.equal(Object.hasOwn(state, 'sections'), false);
   assert.equal(Object.hasOwn(state, 'summary'), false);
+});
+
+test('startup before a workspace is open presents a dedicated recoverable state', async () => {
+  const git = { async detect() { throw error('SCM_GIT_NO_WORKSPACE'); } };
+  const { controller, snapshots } = createHarness(git, 'zh-CN');
+  const result = await controller.start();
+  const state = snapshots.at(-1);
+
+  assert.deepEqual(result.error, {
+    code: 'SCM_GIT_NO_WORKSPACE',
+    message: '请先打开本地工作区，然后刷新源代码管理。'
+  });
+  assert.equal(state.phase, 'error');
+  assert.equal(state.title, '尚未打开本地工作区');
+  assert.equal(state.message, '请先打开本地工作区，然后刷新源代码管理。');
+  assert.deepEqual(state.actions.map((item) => item.command), ['bobocloud.local-scm.refresh']);
 });
 
 test('invalid clone address is rejected locally and never becomes a network request', async () => {
@@ -200,6 +221,11 @@ test('invalid clone address is rejected locally and never becomes a network requ
   const state = snapshots.at(-1);
 
   assert.equal(result.ok, false);
+  assert.deepEqual(result.error, {
+    code: 'SCM_GIT_OPERATION_FAILED',
+    message: '请输入有效的 HTTPS 或 SSH 远程仓库地址，然后重试。'
+  });
+  assert.equal(Object.getPrototypeOf(result.error), Object.prototype);
   assert.equal(state.title, '远程仓库地址无效');
   assert.equal(state.message, '请输入有效的 HTTPS 或 SSH 远程仓库地址，然后重试。');
   assert.equal(git.calls.some(([method]) => method === 'clone'), false);
@@ -316,6 +342,11 @@ test('a failed repository mutation preserves the current status and history cont
   const state = snapshots.at(-1);
 
   assert.equal(result.ok, false);
+  assert.deepEqual(result.error, {
+    code: 'SCM_GIT_AUTH_REQUIRED',
+    message: '无法在本地工作区完成该操作。请刷新后重试。'
+  });
+  assert.equal(Object.getPrototypeOf(result.error), Object.prototype);
   assert.equal(state.phase, 'ready');
   assert.equal(state.message, '无法在本地工作区完成该操作。请刷新后重试。');
   assert.equal(section(state, 'staged').items.length, 1);

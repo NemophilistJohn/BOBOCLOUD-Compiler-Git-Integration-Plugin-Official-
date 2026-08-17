@@ -4,6 +4,8 @@
   "state.empty.title": "No local repository",
   "state.empty.message": "Initialize this local workspace or clone a valid remote repository into an empty workspace.",
   "state.ready": "Local workspace source control",
+  "state.noWorkspace.title": "No local workspace",
+  "state.noWorkspace.message": "Open a local workspace, then refresh source control.",
   "state.gitUnavailable.title": "Git is unavailable",
   "state.gitUnavailable.message": "Git is not installed or cannot be used on this device. Install Git and refresh.",
   "state.remoteInvalid.title": "Remote repository address is invalid",

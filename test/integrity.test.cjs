@@ -20,12 +20,12 @@ async function payloadFiles(directory, prefix = '') {
   return result;
 }
 
-test('generated payload has a complete SHA-256 manifest for the official 1.1.0 package', async () => {
+test('generated payload has a complete SHA-256 manifest for the official 1.1.1 package', async () => {
   const manifest = JSON.parse(await fs.readFile(path.join(PAYLOAD, 'manifest.json'), 'utf8'));
   const files = await payloadFiles(PAYLOAD);
 
   assert.equal(manifest.id, 'bobocloud.local-scm');
-  assert.equal(manifest.version, '1.1.0');
+  assert.equal(manifest.version, '1.1.1');
   assert.equal(manifest.engines.pluginApi, '^1.2.0');
   assert.equal(manifest.integrity.algorithm, 'sha256');
   assert.deepEqual(Object.keys(manifest.integrity.files).sort(), files.sort());
