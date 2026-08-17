@@ -175,7 +175,7 @@ test('empty-workspace fixture produces an initialize-or-clone local-only state',
   assert.equal(state.phase, fixture.expectedPhase);
   assert.equal(state.title, '未检测到本地仓库');
   assert.match(state.message, /初始化此本地工作区/);
-  assert.equal(state.summary.items[0].value, '此扩展仅操作本地工作区，不会改变云端同步。');
+  assert.equal(Object.hasOwn(state, 'summary'), false);
   assert.equal(state.actions.some((item) => item.id === 'initialize'), true);
   assert.equal(state.actions.some((item) => item.id === 'clone'), true);
   assert.equal(decorationClears.length > 0, true);
@@ -255,14 +255,11 @@ test('startup before a workspace is open presents a dedicated recoverable state'
   const result = await controller.start();
   const state = snapshots.at(-1);
 
-  assert.deepEqual(result.error, {
-    code: 'SCM_GIT_NO_WORKSPACE',
-    message: '请先打开本地工作区，然后刷新源代码管理。'
-  });
-  assert.equal(state.phase, 'error');
-  assert.equal(state.title, '尚未打开本地工作区');
-  assert.equal(state.message, '请先打开本地工作区，然后刷新源代码管理。');
-  assert.deepEqual(state.actions.map((item) => item.command), ['bobocloud.local-scm.refresh']);
+  assert.deepEqual(result, { ok: true, phase: 'empty' });
+  assert.equal(state.phase, 'empty');
+  assert.equal(state.title, '源代码管理');
+  assert.equal(state.message, '工作区为空');
+  assert.deepEqual(state.actions, []);
 });
 
 test('invalid clone address is rejected locally and never becomes a network request', async () => {
@@ -314,13 +311,11 @@ test('nested repository status uses broker offsets, preserves groups, and publis
   assert.equal(section(state, 'unstaged').items[0].meta, '+1 -0');
   assert.equal(section(state, 'untracked').items[0].meta, '?');
   assert.equal(state.actions.find((item) => item.id === 'commit').form.fields[0].maxLength, 4096);
-  assert.equal(state.summary.items.find((item) => item.label === 'File tree status').value, 'On');
   assert.equal(state.actions.find((item) => item.id === 'toggleDecorations').title, 'Hide file tree status');
 
   const clearsBeforeToggle = decorationClears.length;
   await controller.handleCommand(commandIds().toggleDecorations, {});
   assert.equal(decorationClears.length, clearsBeforeToggle + 1);
-  assert.equal(snapshots.at(-1).summary.items.find((item) => item.label === 'File tree status').value, 'Off');
   const setsBeforeEnable = decorationSets.length;
   await controller.handleCommand(commandIds().toggleDecorations, {});
   assert.equal(decorationSets.length, setsBeforeEnable + 1);

@@ -7,6 +7,7 @@
   "state.unborn.message": "此本地仓库尚无提交。准备好后可创建首次提交并推送到远程仓库。",
   "state.noWorkspace.title": "尚未打开本地工作区",
   "state.noWorkspace.message": "请先打开本地工作区，然后刷新源代码管理。",
+  "state.noWorkspace.empty": "工作区为空",
   "state.gitUnavailable.title": "Git 不可用",
   "state.gitUnavailable.message": "当前无 Git 环境，请安装 Git 并配置 PATH 后刷新。",
   "state.remoteInvalid.title": "远程仓库地址无效",

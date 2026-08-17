@@ -373,6 +373,7 @@ export class LocalScmController {
     this._historyHasMore = true;
     this._historyNextOffset = 0;
     this._error = null;
+    this._emptyKind = 'repository';
     this._itemTargets = new Map();
     this._decorationsEnabled = options.decorationsEnabled !== false;
   }
@@ -404,6 +405,7 @@ export class LocalScmController {
         if (repositories.length === 0) {
           this._activeRepositoryId = '';
           this._resetRepositoryData();
+          this._emptyKind = 'repository';
           this._phase = LocalScmPhase.EMPTY;
           await this._clearDecorations();
           await this._emit();
@@ -735,6 +737,7 @@ export class LocalScmController {
     if (this._repositories.length === 0) {
       this._activeRepositoryId = '';
       this._resetRepositoryData();
+      this._emptyKind = 'repository';
       this._phase = LocalScmPhase.EMPTY;
       await this._clearDecorations();
       await this._emit();
@@ -861,6 +864,17 @@ export class LocalScmController {
   }
 
   async _showNamedError(kind, error) {
+    if (kind === 'noWorkspace') {
+      this._phase = LocalScmPhase.EMPTY;
+      this._emptyKind = 'workspace';
+      this._repositories = [];
+      this._activeRepositoryId = '';
+      this._resetRepositoryData();
+      this._error = null;
+      await this._clearDecorations();
+      await this._emit();
+      return { ok: true, phase: this._phase };
+    }
     this._phase = LocalScmPhase.ERROR;
     this._error = this._errorState(kind, error);
     await this._clearDecorations();
@@ -951,14 +965,18 @@ export class LocalScmController {
       };
     }
     if (this._phase === LocalScmPhase.EMPTY) {
+      if (this._emptyKind === 'workspace') {
+        return {
+          phase: 'empty',
+          title: this._t('activity.title'),
+          message: this._t('state.noWorkspace.empty'),
+          actions: []
+        };
+      }
       return {
         phase: 'empty',
         title: this._t('state.empty.title'),
         message: this._t('state.empty.message'),
-        summary: {
-          title: this._t('activity.title'),
-          items: [{ label: this._t('summary.scope'), value: this._t('notice.localOnly') }]
-        },
         actions: [
           action('refresh', this._t('action.refresh'), this._commands.refresh, { placement: 'toolbar', icon: 'refresh' }),
           action('publish', this._t('action.publish'), this._commands.publish, {
@@ -1108,20 +1126,20 @@ export class LocalScmController {
             textField('message', this._t('field.commitMessage'), { type: 'textarea', required: true, maxLength: 4096 })
           ])
         }),
-        action('pull', this._t('action.pull'), this._commands.pull, {
-          placement: 'menu', icon: 'pull',
-          form: form(this._t('form.pull.title'), this._t('action.pull'), [
-            textField('remote', this._t('field.remote'), { maxLength: 64 }),
-            textField('branch', this._t('field.branch'), { maxLength: 120 })
-          ])
-        }),
         action('push', this._t('action.push'), this._commands.push, {
-          placement: 'menu', icon: 'push',
+          placement: 'toolbar', icon: 'push',
           form: form(this._t('form.push.title'), this._t('action.push'), [
             textField('remote', this._t('field.remote'), { maxLength: 64 }),
             textField('branch', this._t('field.branch'), { maxLength: 120 }),
             checkboxField('force', this._t('field.force')),
             checkboxField('setUpstream', this._t('field.setUpstream'))
+          ])
+        }),
+        action('pull', this._t('action.pull'), this._commands.pull, {
+          placement: 'menu', icon: 'pull',
+          form: form(this._t('form.pull.title'), this._t('action.pull'), [
+            textField('remote', this._t('field.remote'), { maxLength: 64 }),
+            textField('branch', this._t('field.branch'), { maxLength: 120 })
           ])
         }),
         action('toggleDecorations', this._t(this._decorationsEnabled ? 'action.hideDecorations' : 'action.showDecorations'), this._commands.toggleDecorations, { placement: 'menu', icon: 'visibility' }),
@@ -1150,12 +1168,7 @@ export class LocalScmController {
         title: this._t('state.ready'),
         items: [
           { label: this._t('summary.branch'), value: displayText(branch.head, 256, '-') },
-          { label: this._t('summary.remote'), value: displayText(remote && remote.urls && remote.urls[0], 256, '-') },
-          { label: this._t('summary.upstream'), value: displayText(branch.upstream || (remote && remote.name), 256, '-') },
-          { label: this._t('summary.ahead'), value: String(Number(branch.ahead) || 0) },
-          { label: this._t('summary.behind'), value: String(Number(branch.behind) || 0) },
-          { label: this._t('summary.fileDecorations'), value: this._t(this._decorationsEnabled ? 'state.enabled' : 'state.disabled') },
-          { label: this._t('summary.scope'), value: this._t('notice.localOnly') }
+          { label: this._t('summary.remote'), value: displayText(remote && remote.urls && remote.urls[0], 256, '-') }
         ]
       },
       sections,
