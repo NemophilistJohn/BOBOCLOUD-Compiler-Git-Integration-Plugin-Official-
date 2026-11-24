@@ -119,5 +119,9 @@
   "state.refreshAfterSuccess.title": "操作は完了しましたが更新に失敗しました",
   "state.refreshAfterSuccess.message": "Git 操作は完了しましたが表示を更新できません。再試行の前に更新して結果を確認してください。",
   "notice.pushUpToDate": "リモートは既に最新です。",
-  "label.operationLog": "Git 操作の出力"
+  "label.operationLog": "Git 操作の出力",
+  "state.upstreamMismatch.title": "ホストの更新が必要です",
+  "state.upstreamMismatch.message": "このホストでは名前の異なる上流ブランチに安全にプッシュできません。ホストを更新するか、ターミナルで Git を使用してください。",
+  "field.localBranch": "プッシュするローカルブランチ（任意）",
+  "field.remoteBranch": "プルするリモートブランチ（任意）"
 }

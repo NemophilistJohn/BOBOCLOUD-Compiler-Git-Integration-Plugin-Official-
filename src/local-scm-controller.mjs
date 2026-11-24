@@ -212,6 +212,7 @@ export function classifyScmError(error, operation = '') {
   if (code === 'SCM_GIT_BRANCH_CHECKED_OUT') return 'branchCheckedOut';
   if (code === 'SCM_GIT_OUTCOME_UNKNOWN') return 'outcomeUnknown';
   if (code === 'SCM_GIT_REFRESH_AFTER_SUCCESS') return 'refreshAfterSuccess';
+  if (code === 'SCM_GIT_UPSTREAM_MISMATCH') return 'upstreamMismatch';
   if (code === 'SCM_GIT_REMOTE_DENIED') return operation === 'clone' ? 'remoteInvalid' : 'remoteUnavailable';
   if (operation === 'clone' && code === 'SCM_GIT_WORKSPACE_NOT_EMPTY') return 'workspaceNotEmpty';
   if (operation === 'clone' && (code === 'SCM_GIT_REMOTE_DENIED' || code === 'SCM_GIT_AUTH_REQUIRED' ||
@@ -779,6 +780,13 @@ export class LocalScmController {
         const trackedRemote = configured.find((entry) => entry && typeof entry.name === 'string' && upstream.startsWith(entry.name + '/'));
         const remote = remoteName(input.remote) || (trackedRemote && trackedRemote.name) || (configured[0] && configured[0].name);
         const branch = input.branch === undefined || input.branch === null || input.branch === '' ? undefined : branchName(input.branch);
+        const currentBranch = this._status && this._status.branch && this._status.branch.head || '';
+        if (method === 'push' && !this._enhancedView && !branch && trackedRemote && remote === trackedRemote.name &&
+            upstream.slice(trackedRemote.name.length + 1) !== currentBranch) {
+          const error = new Error('The installed host cannot safely push to a differently named upstream branch.');
+          error.code = 'SCM_GIT_UPSTREAM_MISMATCH';
+          throw error;
+        }
         const args = { repositoryId: this._active() };
         if (remote) args.remote = remote;
         if (branch) args.branch = branch;
@@ -1023,6 +1031,8 @@ export class LocalScmController {
              ? ['state.outcomeUnknown.title', 'state.outcomeUnknown.message']
           : kind === 'refreshAfterSuccess'
              ? ['state.refreshAfterSuccess.title', 'state.refreshAfterSuccess.message']
+          : kind === 'upstreamMismatch'
+             ? ['state.upstreamMismatch.title', 'state.upstreamMismatch.message']
           : ['state.operationFailed.title', 'state.operationFailed.message'];
   }
 
@@ -1248,7 +1258,7 @@ export class LocalScmController {
           placement: 'toolbar', icon: 'push',
           form: form(this._t('form.push.title'), this._t('action.push'), [
             textField('remote', this._t('field.remoteName'), { maxLength: 64, placeholder: 'origin' }),
-            textField('branch', this._t('field.branch'), { maxLength: 120 }),
+            textField('branch', this._t('field.localBranch'), { maxLength: 120 }),
             checkboxField('setUpstream', this._t('field.setUpstream'), !branch.upstream)
           ])
         }),
@@ -1256,7 +1266,7 @@ export class LocalScmController {
           placement: 'menu', icon: 'pull',
           form: form(this._t('form.pull.title'), this._t('action.pull'), [
             textField('remote', this._t('field.remoteName'), { maxLength: 64, placeholder: 'origin' }),
-            textField('branch', this._t('field.branch'), { maxLength: 120 })
+            textField('branch', this._t('field.remoteBranch'), { maxLength: 120 })
           ])
         }),
         action('toggleDecorations', this._t(this._decorationsEnabled ? 'action.hideDecorations' : 'action.showDecorations'), this._commands.toggleDecorations, { placement: 'menu', icon: 'visibility' }),

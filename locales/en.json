@@ -119,5 +119,9 @@
   "state.refreshAfterSuccess.title": "Operation completed; refresh failed",
   "state.refreshAfterSuccess.message": "Git completed the operation, but the view could not be refreshed. Refresh and verify the result before retrying.",
   "notice.pushUpToDate": "The remote is already up to date.",
-  "label.operationLog": "Git operation output"
+  "label.operationLog": "Git operation output",
+  "state.upstreamMismatch.title": "Host upgrade required",
+  "state.upstreamMismatch.message": "This host cannot safely push to an upstream with a different branch name. Upgrade the host or use Git in a terminal.",
+  "field.localBranch": "Local branch to push (optional)",
+  "field.remoteBranch": "Remote branch to pull (optional)"
 }

@@ -501,3 +501,21 @@ test('a successful commit followed by a refresh failure is not reported as a fai
   assert.match(controller.state.message, /Git completed the operation/);
   assert.equal(git.calls.filter(([name]) => name === 'commit').length, 1);
 });
+
+test('older hosts do not push to a wrong branch when the tracked branch has a different name', async () => {
+  const git = readyBroker();
+  const originalStatus = git.status;
+  git.status = async (args) => {
+    const page = await originalStatus(args);
+    return { ...page, branch: { ...page.branch, head: 'local', upstream: 'origin/review' } };
+  };
+  const { controller } = createHarness(git, 'en', false);
+  await controller.start();
+  const result = await controller.push({ remote: '', branch: '' });
+  assert.equal(result.error.code, 'SCM_GIT_UPSTREAM_MISMATCH');
+  assert.equal(git.calls.some(([name]) => name === 'push'), false);
+  assert.match(controller.state.message, /different branch name/);
+  const enhanced = createHarness(git, 'en', true).controller;
+  await enhanced.start();
+  assert.equal((await enhanced.push({ remote: '', branch: '' })).ok, true);
+});

@@ -119,5 +119,9 @@
   "state.refreshAfterSuccess.title": "操作已完成，但刷新失败",
   "state.refreshAfterSuccess.message": "Git 操作已完成，但视图刷新失败。请先刷新并核实结果，避免重复执行。",
   "notice.pushUpToDate": "远端已是最新状态。",
-  "label.operationLog": "Git 操作输出"
+  "label.operationLog": "Git 操作输出",
+  "state.upstreamMismatch.title": "需要升级宿主",
+  "state.upstreamMismatch.message": "当前宿主无法安全推送到名称不同的上游分支。请升级宿主或在终端中使用 Git。",
+  "field.localBranch": "要推送的本地分支（可选）",
+  "field.remoteBranch": "要拉取的远端分支（可选）"
 }
