@@ -113,7 +113,7 @@
   "status.untracked": "未追跡",
   "status.ignored": "無視",
   "state.outcomeUnknown.title": "結果の確認が必要です",
-  "state.outcomeUnknown.message": "Git がタイムアウトしました。ローカルまたはリモート操作が完了した可能性があります。再試行前に状態を更新して確認してください。",
+  "state.outcomeUnknown.message": "結果を確認できませんでした。ローカルまたはリモート操作が完了した可能性があります。再試行前に状態を更新して確認してください。",
   "label.remoteBranch": "リモートブランチ",
   "state.publishPartial": "最初のローカルコミットは作成されました。リモート公開は未確認です。",
   "state.refreshAfterSuccess.title": "操作は完了しましたが更新に失敗しました",

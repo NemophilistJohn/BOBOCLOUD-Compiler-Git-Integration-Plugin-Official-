@@ -19,7 +19,7 @@ card removes its Git remote and local remote-tracking references, not the hosted
 repository or local source files. Git must be available on PATH; authentication
 uses the local Git credential helper or SSH agent.
 
-The installable artifact is `artifacts/bobocloud.local-scm-3.0.0.boboplugin`.
+The installable artifact is `artifacts/bobocloud.local-scm-3.0.1.boboplugin`.
 Run `npm install` followed by `npm run package` to build it, run its tests and
 verify archive integrity. The host renders all UI from bounded data; the Worker
 has no DOM, shell, arbitrary network, or direct filesystem access. Localized

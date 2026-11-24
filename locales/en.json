@@ -113,7 +113,7 @@
   "status.untracked": "Untracked",
   "status.ignored": "Ignored",
   "state.outcomeUnknown.title": "Result needs verification",
-  "state.outcomeUnknown.message": "Git timed out. The local or remote operation may have completed; refresh and verify its state before retrying.",
+  "state.outcomeUnknown.message": "The result could not be confirmed. The local or remote operation may have completed; refresh and verify its state before retrying.",
   "label.remoteBranch": "Remote branch",
   "state.publishPartial": "The first local commit was created; remote publication is not confirmed.",
   "state.refreshAfterSuccess.title": "Operation completed; refresh failed",

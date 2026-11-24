@@ -113,7 +113,7 @@
   "status.untracked": "未跟踪",
   "status.ignored": "已忽略",
   "state.outcomeUnknown.title": "操作结果需要核实",
-  "state.outcomeUnknown.message": "Git 已超时，本地或远端操作可能已经完成。重试前请刷新并核实实际状态。",
+  "state.outcomeUnknown.message": "无法确认操作结果，本地或远端操作可能已经完成。重试前请刷新并核实实际状态。",
   "label.remoteBranch": "远端分支",
   "state.publishPartial": "首次本地提交已创建；远端发布尚未确认。",
   "state.refreshAfterSuccess.title": "操作已完成，但刷新失败",
