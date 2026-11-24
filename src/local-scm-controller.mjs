@@ -63,6 +63,13 @@ function optionalString(value, label, maxLength = 160) {
   return value.trim();
 }
 
+function commitMessage(value) {
+  if (typeof value !== 'string' || !value.trim() || value.length > 4096 || value.includes('\0')) {
+    throw new TypeError('Commit message is invalid.');
+  }
+  return value.trim();
+}
+
 function branchName(value) {
   const branch = optionalString(value, 'Branch name', 120);
   if (!branch || !/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(branch) || branch.includes('..') ||
@@ -200,6 +207,12 @@ export function classifyScmError(error, operation = '') {
   if (code === 'SCM_GIT_UNAVAILABLE') return 'gitUnavailable';
   if (code === 'SCM_GIT_IDENTITY_REQUIRED') return 'identityRequired';
   if (code === 'SCM_GIT_NOTHING_TO_COMMIT') return 'nothingToCommit';
+  if (code === 'SCM_GIT_AUTH_REQUIRED') return 'authenticationRequired';
+  if (code === 'SCM_GIT_CONFLICT') return 'conflict';
+  if (code === 'SCM_GIT_BRANCH_CHECKED_OUT') return 'branchCheckedOut';
+  if (code === 'SCM_GIT_OUTCOME_UNKNOWN') return 'outcomeUnknown';
+  if (code === 'SCM_GIT_REFRESH_AFTER_SUCCESS') return 'refreshAfterSuccess';
+  if (code === 'SCM_GIT_REMOTE_DENIED') return operation === 'clone' ? 'remoteInvalid' : 'remoteUnavailable';
   if (operation === 'clone' && code === 'SCM_GIT_WORKSPACE_NOT_EMPTY') return 'workspaceNotEmpty';
   if (operation === 'clone' && (code === 'SCM_GIT_REMOTE_DENIED' || code === 'SCM_GIT_AUTH_REQUIRED' ||
       code === 'SCM_GIT_CLONE_FAILED' || code === 'SCM_GIT_OPERATION_FAILED')) {
@@ -355,6 +368,8 @@ export class LocalScmController {
     this._decorations = options.decorations || null;
     this._t = typeof options.translate === 'function' ? options.translate : (key) => key;
     this._commands = Object.freeze({ ...options.commands });
+    this._enhancedView = options.enhancedView === true;
+    this._detail = null;
     this._changePageSize = pageSize(options.changePageSize, DEFAULT_CHANGE_PAGE_SIZE);
     this._historyPageSize = pageSize(options.historyPageSize, DEFAULT_HISTORY_PAGE_SIZE);
     this._queue = Promise.resolve();
@@ -373,6 +388,9 @@ export class LocalScmController {
     this._historyHasMore = true;
     this._historyNextOffset = 0;
     this._error = null;
+    this._notice = '';
+    this._operation = '';
+    this._publishCommitted = false;
     this._emptyKind = 'repository';
     this._itemTargets = new Map();
     this._decorationsEnabled = options.decorationsEnabled !== false;
@@ -462,13 +480,12 @@ export class LocalScmController {
         const values = plainObject(options) ? options : {};
         remote = validateRemoteAddress(values.remote);
         branch = branchName(values.branch || 'main');
-        message = optionalString(values.message, 'Initial commit message', 4096);
-        if (!message) throw new TypeError('Initial commit message is required.');
+        message = commitMessage(values.message);
       } catch (error) {
         return this._showNamedError('remoteInvalid', error);
       }
       try {
-        await this._setLoading();
+        await this._setLoading('publish');
         const detected = await this._requireGitMethod('detect')({ includeNested: true });
         const repositories = Array.isArray(detected && detected.repositories)
           ? detected.repositories.map(normalRepository).filter(Boolean)
@@ -489,11 +506,18 @@ export class LocalScmController {
         }
         await this._requireGitMethod('stageAll')({ repositoryId: root.repositoryId });
         await this._requireGitMethod('commit')({ repositoryId: root.repositoryId, message });
+        this._publishCommitted = true;
         await this._requireGitMethod('setRemote')({ repositoryId: root.repositoryId, name: 'origin', url: remote });
         await this._requireGitMethod('push')({ repositoryId: root.repositoryId, remote: 'origin', branch, setUpstream: true });
-        await this._refreshAfterMutation();
+        await this._refreshAfterSuccess();
+        this._notice = 'notice.published';
+        await this._emit();
         return { ok: true };
       } catch (error) {
+        // A publish consists of several independent Git mutations. Re-read the
+        // repository even when a later step fails so retry never repeats a
+        // successful initial commit or hides the real repository state.
+        try { await this._refreshAfterMutation(); } catch (_) {}
         return this._showError(error, 'publish');
       }
     });
@@ -504,11 +528,13 @@ export class LocalScmController {
       let remote;
       try { remote = validateRemoteAddress(value); } catch (error) { return this._showNamedError('remoteInvalid', error); }
       try {
-        await this._setLoading();
+        await this._setLoading('clone');
         const cloned = await this._requireGitMethod('clone')({ url: remote });
         const repository = normalRepository(cloned && (cloned.repository || cloned));
         if (repository) this._activeRepositoryId = repository.repositoryId;
-        await this._refreshAfterMutation();
+        await this._refreshAfterSuccess();
+        this._notice = 'notice.cloned';
+        await this._emit();
         return { ok: true };
       } catch (error) {
         return this._showError(error, 'clone');
@@ -549,11 +575,12 @@ export class LocalScmController {
   commit(message) {
     return this._enqueue(async () => {
       try {
-        const text = optionalString(message, 'Commit message', 4096);
-        if (!text) throw new TypeError('Commit message is required.');
-        await this._setLoading();
+        const text = commitMessage(message);
+        await this._setLoading('commit');
         await this._requireGitMethod('commit')({ repositoryId: this._active(), message: text });
-        await this._refreshAfterMutation();
+        await this._refreshAfterSuccess();
+        this._notice = 'notice.committed';
+        await this._emit();
         return { ok: true };
       } catch (error) {
         return this._showError(error, 'commit');
@@ -565,12 +592,47 @@ export class LocalScmController {
   pull(options = {}) { return this._remoteOperation('pull', options); }
   push(options = {}) { return this._remoteOperation('push', options); }
 
+  setRemote(options = {}) {
+    return this._enqueue(async () => {
+      try {
+        const name = remoteName(options.name || 'origin');
+        const url = validateRemoteAddress(options.url);
+        await this._setLoading('setRemote');
+        await this._requireGitMethod('setRemote')({ repositoryId: this._active(), name, url });
+        await this._refreshAfterSuccess();
+        this._notice = 'notice.remoteSaved';
+        await this._emit();
+        return { ok: true };
+      } catch (error) { return this._showError(error, 'setRemote'); }
+    });
+  }
+
+  viewDiff(target) {
+    return this._enqueue(async () => {
+      try {
+        const path = requireRelativePath(target.path, 'Repository file path');
+        if (target.fileKind === 'untracked') {
+          this._detail = { title: path, content: this._t('detail.untracked') };
+        } else {
+          const result = await this._requireGitMethod('diff')({ repositoryId: this._active(), path, staged: target.side === 'staged' });
+          const content = typeof result.content === 'string' ? result.content : '';
+          this._detail = {
+            title: path,
+            content: content ? content.slice(0, 30000) + (content.length > 30000 ? '\n\n' + this._t('detail.truncated') : '') : this._t('detail.empty')
+          };
+        }
+        await this._emit();
+        return { ok: true };
+      } catch (error) { return this._showError(error, 'diff'); }
+    });
+  }
+
   checkout(branch, force = false) {
     return this._enqueue(async () => {
       try {
         await this._setLoading();
         await this._requireGitMethod('checkout')({ repositoryId: this._active(), branch: branchName(branch), force: force === true });
-        await this._refreshAfterMutation();
+        await this._refreshAfterSuccess();
         return { ok: true };
       } catch (error) {
         return this._showError(error, 'checkout');
@@ -583,7 +645,7 @@ export class LocalScmController {
       try {
         await this._setLoading();
         await this._requireGitMethod('createBranch')({ repositoryId: this._active(), name: branchName(name), checkout: checkout === true });
-        await this._refreshAfterMutation();
+        await this._refreshAfterSuccess();
         return { ok: true };
       } catch (error) {
         return this._showError(error, 'createBranch');
@@ -596,7 +658,7 @@ export class LocalScmController {
       try {
         await this._setLoading();
         await this._requireGitMethod('deleteBranch')({ repositoryId: this._active(), name: branchName(name), force: force === true });
-        await this._refreshAfterMutation();
+        await this._refreshAfterSuccess();
         return { ok: true };
       } catch (error) {
         return this._showError(error, 'deleteBranch');
@@ -675,6 +737,7 @@ export class LocalScmController {
     if (command === this._commands.unstage && target && target.kind === 'change') {
       return this.unstage([target.path]);
     }
+    if (command === this._commands.viewDiff && target && target.kind === 'change') return this.viewDiff(target);
     if (command === this._commands.refresh) return this.refresh();
     if (command === this._commands.initialize) return this.initializeRepository();
     if (command === this._commands.clone) return this.cloneRemote(values.remote);
@@ -684,6 +747,7 @@ export class LocalScmController {
     if (command === this._commands.fetch) return this.fetch(values);
     if (command === this._commands.pull) return this.pull(values);
     if (command === this._commands.push) return this.push(values);
+    if (command === this._commands.setRemote) return this.setRemote(values);
     if (command === this._commands.checkout) return this.checkout(values.branch, values.force === true);
     if (command === this._commands.createBranch) return this.createBranch(values.name, values.checkout === true);
     if (command === this._commands.deleteBranch) return this.deleteBranch(values.name, values.force === true);
@@ -702,7 +766,7 @@ export class LocalScmController {
   async _mutateStatusNow(method, input) {
     await this._setLoading();
     await this._requireGitMethod(method)({ repositoryId: this._active(), ...input });
-    await this._refreshAfterMutation();
+    await this._refreshAfterSuccess();
     return { ok: true };
   }
 
@@ -710,8 +774,11 @@ export class LocalScmController {
     return this._enqueue(async () => {
       try {
         const input = plainObject(options) ? options : {};
-        const remote = remoteName(input.remote);
-        const branch = input.branch === undefined ? undefined : branchName(input.branch);
+        const configured = Array.isArray(this._remotes && this._remotes.remotes) ? this._remotes.remotes : [];
+        const upstream = this._status && this._status.branch && this._status.branch.upstream || '';
+        const trackedRemote = configured.find((entry) => entry && typeof entry.name === 'string' && upstream.startsWith(entry.name + '/'));
+        const remote = remoteName(input.remote) || (trackedRemote && trackedRemote.name) || (configured[0] && configured[0].name);
+        const branch = input.branch === undefined || input.branch === null || input.branch === '' ? undefined : branchName(input.branch);
         const args = { repositoryId: this._active() };
         if (remote) args.remote = remote;
         if (branch) args.branch = branch;
@@ -719,14 +786,28 @@ export class LocalScmController {
           if (input.force !== undefined) args.force = input.force === true;
           if (input.setUpstream !== undefined) args.setUpstream = input.setUpstream === true;
         }
-        await this._setLoading();
-        await this._requireGitMethod(method)(args);
-        await this._refreshAfterMutation();
+        await this._setLoading(method);
+        const result = await this._requireGitMethod(method)(args);
+        await this._refreshAfterSuccess();
+        const output = typeof result?.output === 'string' ? result.output.trim() : '';
+        if (output && this._enhancedView) this._detail = { title: this._t('label.operationLog'), content: output.slice(0, 30000) };
+        this._notice = method === 'push' && /(?:up.to.date|everything up.to.date)/i.test(output)
+          ? 'notice.pushUpToDate' : 'notice.' + method + 'Complete';
+        await this._emit();
         return { ok: true };
       } catch (error) {
         return this._showError(error, method);
       }
     });
+  }
+
+  async _refreshAfterSuccess() {
+    try { await this._refreshAfterMutation(); }
+    catch (_) {
+      const error = new Error('The Git operation completed, but the view could not be refreshed.');
+      error.code = 'SCM_GIT_REFRESH_AFTER_SUCCESS';
+      throw error;
+    }
   }
 
   async _refreshAfterMutation() {
@@ -783,6 +864,7 @@ export class LocalScmController {
 
   _resetRepositoryData() {
     this._status = null;
+    this._detail = null;
     this._branches = null;
     this._remotes = null;
     this._resetStatusPages();
@@ -844,9 +926,12 @@ export class LocalScmController {
       this._history.length < MAX_VISIBLE_SECTION_ITEMS;
   }
 
-  async _setLoading() {
+  async _setLoading(operation = '') {
     this._phase = LocalScmPhase.LOADING;
     this._error = null;
+    this._notice = '';
+    this._operation = operation;
+    this._publishCommitted = false;
     await this._emit();
   }
 
@@ -889,6 +974,7 @@ export class LocalScmController {
     if (canPreserveRepository) {
       this._phase = LocalScmPhase.READY;
       this._error = this._errorState(classifyScmError(error, operation), error);
+      this._error.partialPublish = operation === 'publish' && this._publishCommitted && errorCode(error) !== 'SCM_GIT_REFRESH_AFTER_SUCCESS';
       await this._emit();
       return this._commandFailure(this._error.kind, error);
     }
@@ -925,6 +1011,18 @@ export class LocalScmController {
             ? ['state.identityRequired.title', 'state.identityRequired.message']
           : kind === 'nothingToCommit'
             ? ['state.nothingToCommit.title', 'state.nothingToCommit.message']
+          : kind === 'authenticationRequired'
+             ? ['state.authenticationRequired.title', 'state.authenticationRequired.message']
+          : kind === 'conflict'
+             ? ['state.conflict.title', 'state.conflict.message']
+          : kind === 'branchCheckedOut'
+             ? ['state.branchCheckedOut.title', 'state.branchCheckedOut.message']
+          : kind === 'remoteUnavailable'
+             ? ['state.remoteUnavailable.title', 'state.remoteUnavailable.message']
+          : kind === 'outcomeUnknown'
+             ? ['state.outcomeUnknown.title', 'state.outcomeUnknown.message']
+          : kind === 'refreshAfterSuccess'
+             ? ['state.refreshAfterSuccess.title', 'state.refreshAfterSuccess.message']
           : ['state.operationFailed.title', 'state.operationFailed.message'];
   }
 
@@ -954,11 +1052,11 @@ export class LocalScmController {
         ]
       };
     }
-    if (this._phase === LocalScmPhase.LOADING) {
+    if (this._phase === LocalScmPhase.LOADING && !this._status) {
       return {
         phase: 'loading',
         title: this._t('activity.title'),
-        message: this._t('state.loading'),
+        message: this._t(this._operation ? 'operation.' + this._operation : 'state.loading'),
         actions: [
           action('refresh', this._t('action.refresh'), this._commands.refresh, { disabled: true })
         ]
@@ -1023,7 +1121,7 @@ export class LocalScmController {
 
     const appendChanges = (sectionId, title, entries, command, showLoadMore) => {
       const items = entries.slice(0, MAX_VISIBLE_SECTION_ITEMS).map((entry, index) => {
-        const id = addTarget(sectionId + '-' + index, { kind: 'change', path: entry.path });
+        const id = addTarget(sectionId + '-' + index, { kind: 'change', path: entry.path, side: sectionId, fileKind: entry.kind });
         return {
           id,
           title: displayText(entry.path, 256, '-'),
@@ -1033,9 +1131,10 @@ export class LocalScmController {
           meta: entry.lineStats
             ? '+' + entry.lineStats.additions + ' -' + entry.lineStats.deletions
             : entry.code,
-          badge: entry.status,
-          command,
-          disabled: false
+          badge: this._t('status.' + entry.status),
+          command: this._enhancedView ? this._commands.viewDiff : command,
+          ...(this._enhancedView ? { secondaryAction: { command, title: this._t(sectionId === 'staged' ? 'action.unstage' : 'action.stage'), icon: sectionId === 'staged' ? 'remove' : 'add' } } : {}),
+          disabled: this._phase === LocalScmPhase.LOADING
         };
       });
       sections.push({
@@ -1045,10 +1144,11 @@ export class LocalScmController {
         loadMore: showLoadMore ? { command: this._commands.loadMoreChanges, label: this._t('action.loadMore') } : undefined
       });
     };
-    appendChanges('staged', this._t('group.staged'), groups.staged, this._commands.unstage, false);
-    appendChanges('unstaged', this._t('group.unstaged'), groups.unstaged, this._commands.stage, false);
-    appendChanges('untracked', this._t('group.untracked'), groups.untracked, this._commands.stage, false);
-    appendChanges('conflicted', this._t('group.conflicted'), groups.conflicted, this._commands.stage, this._canLoadMoreChanges());
+    const count = (entries) => ' · ' + entries.length + (this._statusHasMore ? '+' : '');
+    appendChanges('staged', this._t('group.staged') + count(groups.staged), groups.staged, this._commands.unstage, false);
+    appendChanges('unstaged', this._t('group.unstaged') + count(groups.unstaged), groups.unstaged, this._commands.stage, false);
+    appendChanges('untracked', this._t('group.untracked') + count(groups.untracked), groups.untracked, this._commands.stage, false);
+    appendChanges('conflicted', this._t('group.conflicted') + count(groups.conflicted), groups.conflicted, this._commands.stage, this._canLoadMoreChanges());
 
     const localBranches = Array.isArray(this._branches && this._branches.local) ? this._branches.local : [];
     const branchItems = localBranches.filter((branch) => plainObject(branch) && typeof branch.name === 'string' && branch.name.trim())
@@ -1064,7 +1164,21 @@ export class LocalScmController {
         disabled: branch.name === (this._branches && this._branches.current)
       };
     });
-    sections.push({ id: 'branches', title: this._t('section.branches'), items: branchItems });
+    const remoteBranches = Array.isArray(this._branches && this._branches.remote) ? this._branches.remote : [];
+    for (const branch of remoteBranches) {
+      if (branchItems.length >= MAX_VISIBLE_SECTION_ITEMS) break;
+      if (!plainObject(branch) || typeof branch.name !== 'string' || !branch.name.trim()) continue;
+      branchItems.push({ id: 'remote-branch-' + branchItems.length, title: displayText(branch.name, 256), description: this._t('label.remoteBranch'), meta: branch.hash ? displayText(branch.hash, 160) : undefined });
+    }
+    sections.push({ id: 'branches', title: this._t('section.branches'), items: branchItems, collapsed: true });
+
+    const remoteItems = (Array.isArray(this._remotes && this._remotes.remotes) ? this._remotes.remotes : []).slice(0, MAX_VISIBLE_SECTION_ITEMS).map((entry, index) => ({
+      id: 'remote-' + index,
+      title: displayText(entry.name, 256, '-'),
+      description: displayText(entry.urls && entry.urls[0], 512, this._t('state.remoteUnavailable.title')),
+      meta: entry.pushUrls && entry.pushUrls[0] && entry.pushUrls[0] !== (entry.urls && entry.urls[0]) ? displayText(entry.pushUrls[0], 160, '-') : undefined
+    }));
+    sections.push({ id: 'remotes', title: this._t('section.remotes'), items: remoteItems, emptyMessage: this._t('state.noRemote'), collapsed: true });
 
     const historyItems = this._history.slice(0, MAX_VISIBLE_SECTION_ITEMS).map((commit, index) => {
       const title = typeof commit.subject === 'string' && commit.subject.trim()
@@ -1085,6 +1199,7 @@ export class LocalScmController {
       id: 'history',
       title: this._t('group.history'),
       items: historyItems,
+      collapsed: true,
       loadMore: this._canLoadMoreHistory()
         ? { command: this._commands.loadMoreHistory, label: this._t('action.loadMore') }
         : undefined
@@ -1103,12 +1218,20 @@ export class LocalScmController {
         textField('message', this._t('field.initialCommitMessage'), { type: 'textarea', required: true, value: this._t('field.initialCommitDefault'), maxLength: 4096 })
       ])
     });
+    const commitAction = action('commit', this._t('action.commit'), this._commands.commit, {
+      kind: 'primary', placement: this._enhancedView ? 'inline' : 'toolbar', icon: 'commit',
+      form: form(this._t('form.commit.title'), this._t('action.commit'), [
+        textField('message', this._t('field.commitMessage'), { type: 'textarea', required: true, maxLength: 4096 })
+      ])
+    });
     const readyActions = isUnborn
       ? [
         action('refresh', this._t('action.refresh'), this._commands.refresh, { placement: 'toolbar', icon: 'refresh' }),
         action('stageAll', this._t('action.stageAll'), this._commands.stageAll, { placement: 'toolbar', icon: 'stage-all' }),
+        commitAction,
         publishAction,
         action('toggleDecorations', this._t(this._decorationsEnabled ? 'action.hideDecorations' : 'action.showDecorations'), this._commands.toggleDecorations, { placement: 'menu', icon: 'visibility' }),
+        action('setRemote', this._t('action.setRemote'), this._commands.setRemote, { placement: 'menu', icon: 'remote', form: form(this._t('form.setRemote.title'), this._t('action.setRemote'), [textField('name', this._t('field.remoteName'), { required: true, value: 'origin', maxLength: 64 }), textField('url', this._t('field.remote'), { required: true, maxLength: 2048 })]) }),
         action('createBranch', this._t('action.createBranch'), this._commands.createBranch, {
           placement: 'menu', icon: 'branch',
           form: form(this._t('form.createBranch.title'), this._t('action.createBranch'), [
@@ -1120,59 +1243,64 @@ export class LocalScmController {
       : [
         action('refresh', this._t('action.refresh'), this._commands.refresh, { placement: 'toolbar', icon: 'refresh' }),
         action('stageAll', this._t('action.stageAll'), this._commands.stageAll, { placement: 'toolbar', icon: 'stage-all' }),
-        action('commit', this._t('action.commit'), this._commands.commit, {
-          kind: 'primary', placement: 'toolbar', icon: 'commit',
-          form: form(this._t('form.commit.title'), this._t('action.commit'), [
-            textField('message', this._t('field.commitMessage'), { type: 'textarea', required: true, maxLength: 4096 })
-          ])
-        }),
+        commitAction,
         action('push', this._t('action.push'), this._commands.push, {
           placement: 'toolbar', icon: 'push',
           form: form(this._t('form.push.title'), this._t('action.push'), [
-            textField('remote', this._t('field.remote'), { maxLength: 64 }),
+            textField('remote', this._t('field.remoteName'), { maxLength: 64, placeholder: 'origin' }),
             textField('branch', this._t('field.branch'), { maxLength: 120 }),
-            checkboxField('force', this._t('field.force')),
-            checkboxField('setUpstream', this._t('field.setUpstream'))
+            checkboxField('setUpstream', this._t('field.setUpstream'), !branch.upstream)
           ])
         }),
         action('pull', this._t('action.pull'), this._commands.pull, {
           placement: 'menu', icon: 'pull',
           form: form(this._t('form.pull.title'), this._t('action.pull'), [
-            textField('remote', this._t('field.remote'), { maxLength: 64 }),
+            textField('remote', this._t('field.remoteName'), { maxLength: 64, placeholder: 'origin' }),
             textField('branch', this._t('field.branch'), { maxLength: 120 })
           ])
         }),
         action('toggleDecorations', this._t(this._decorationsEnabled ? 'action.hideDecorations' : 'action.showDecorations'), this._commands.toggleDecorations, { placement: 'menu', icon: 'visibility' }),
-        action('fetch', this._t('action.fetch'), this._commands.fetch, { placement: 'menu', icon: 'pull', form: form(this._t('form.fetch.title'), this._t('action.fetch'), [textField('remote', this._t('field.remote'), { maxLength: 64 })]) }),
-        action('checkout', this._t('action.checkout'), this._commands.checkout, { placement: 'menu', icon: 'branch', form: form(this._t('form.checkout.title'), this._t('action.checkout'), [textField('branch', this._t('field.branch'), { required: true, maxLength: 120 }), checkboxField('force', this._t('field.force'))]) }),
+        action('setRemote', this._t('action.setRemote'), this._commands.setRemote, { placement: 'menu', icon: 'remote', form: form(this._t('form.setRemote.title'), this._t('action.setRemote'), [textField('name', this._t('field.remoteName'), { required: true, value: 'origin', maxLength: 64 }), textField('url', this._t('field.remote'), { required: true, maxLength: 2048 })]) }),
+        action('fetch', this._t('action.fetch'), this._commands.fetch, { placement: 'menu', icon: 'pull', form: form(this._t('form.fetch.title'), this._t('action.fetch'), [textField('remote', this._t('field.remoteName'), { maxLength: 64, placeholder: 'origin' })]) }),
+        action('checkout', this._t('action.checkout'), this._commands.checkout, { placement: 'menu', icon: 'branch', form: form(this._t('form.checkout.title'), this._t('action.checkout'), [textField('branch', this._t('field.branch'), { required: true, maxLength: 120 })]) }),
         action('createBranch', this._t('action.createBranch'), this._commands.createBranch, { placement: 'menu', icon: 'branch', form: form(this._t('form.createBranch.title'), this._t('action.createBranch'), [textField('name', this._t('field.branch'), { required: true, maxLength: 120 }), checkboxField('checkout', this._t('field.checkoutAfterCreate'), true)]) }),
         action('deleteBranch', this._t('action.deleteBranch'), this._commands.deleteBranch, {
           kind: 'danger',
           placement: 'menu',
           icon: 'branch',
           form: form(this._t('form.deleteBranch.title'), this._t('action.deleteBranch'), [
-            textField('name', this._t('field.branch'), { required: true, maxLength: 120 }),
-            checkboxField('force', this._t('field.force'))
+            textField('name', this._t('field.branch'), { required: true, maxLength: 120 })
           ])
         })
       ];
     return {
-      phase: 'ready',
+      phase: this._phase === LocalScmPhase.LOADING ? 'loading' : 'ready',
       title: this._t('activity.title'),
-      message: isUnborn
-        ? this._t('state.unborn.message')
+      message: this._phase === LocalScmPhase.LOADING
+        ? this._t(this._operation ? 'operation.' + this._operation : 'state.loading')
         : this._error
-        ? this._t(this._errorContent(this._error.kind || 'operationFailed')[1])
+        ? (this._error.partialPublish ? this._t('state.publishPartial') + ' ' : '') + this._t(this._errorContent(this._error.kind || 'operationFailed')[1])
+        : this._notice
+        ? this._t(this._notice)
+        : isUnborn
+        ? this._t('state.unborn.message')
         : undefined,
+      ...(this._enhancedView && this._detail ? { detail: this._detail } : {}),
+      ...(this._enhancedView && this._notice && this._phase === LocalScmPhase.READY ? {
+        completedAction: ({ 'notice.committed': 'commit', 'notice.published': 'publish', 'notice.cloned': 'clone', 'notice.fetchComplete': 'fetch', 'notice.pullComplete': 'pull', 'notice.pushComplete': 'push', 'notice.pushUpToDate': 'push', 'notice.remoteSaved': 'setRemote' })[this._notice]
+      } : {}),
       summary: {
         title: this._t('state.ready'),
         items: [
           { label: this._t('summary.branch'), value: displayText(branch.head, 256, '-') },
-          { label: this._t('summary.remote'), value: displayText(remote && remote.urls && remote.urls[0], 256, '-') }
+          { label: this._t('summary.remote'), value: displayText(remote && remote.urls && remote.urls[0], 256, '-') },
+          { label: this._t('summary.upstream'), value: displayText(branch.upstream, 256, '-') },
+          { label: this._t('summary.ahead'), value: branch.upstream ? String(Number.isInteger(branch.ahead) ? branch.ahead : 0) : '-' },
+          { label: this._t('summary.behind'), value: branch.upstream ? String(Number.isInteger(branch.behind) ? branch.behind : 0) : '-' }
         ]
       },
       sections,
-      actions: readyActions
+      actions: this._phase === LocalScmPhase.LOADING ? readyActions.map((item) => ({ ...item, disabled: true })) : readyActions
     };
   }
 

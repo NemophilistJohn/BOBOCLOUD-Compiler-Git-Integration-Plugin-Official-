@@ -1,3 +1,4 @@
 plugin/manifest.json
 plugin/dist/
 plugin/locales/
+node_modules/

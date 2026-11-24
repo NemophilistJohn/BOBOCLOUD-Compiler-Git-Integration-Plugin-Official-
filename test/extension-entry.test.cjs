@@ -118,15 +118,13 @@ test('worker entry registers only host-rendered local SCM state and responds to 
   assert.equal(harness.commands.has(COMMAND_PREFIX + 'push'), true);
   assert.equal(harness.commands.has(COMMAND_PREFIX + 'toggleDecorations'), true);
 
-  await assert.rejects(
-    harness.commands.get(COMMAND_PREFIX + 'clone').handler({
+  const started = await harness.commands.get(COMMAND_PREFIX + 'clone').handler({
       sourceControlId: SOURCE_CONTROL_ID,
       actionId: 'clone',
       values: { remote: 'file:outside-workspace' }
-    }),
-    (error) => error.code === 'SCM_GIT_OPERATION_FAILED' &&
-      error.message === 'Enter a valid HTTPS or SSH remote repository address, then try again.'
-  );
+    });
+  assert.equal(started.pending, true);
+  await flush();
   assert.equal(harness.snapshots.at(-1).title, 'Remote repository address is invalid');
 
   harness.changeLocale('ja');

@@ -23,6 +23,7 @@ export class LocalScmExtensionSession {
     this._translate = options.translate;
     this._sourceControlId = options.sourceControlId;
     this._decorationId = options.decorationId;
+    this._enhancedView = /^1\.(?:1[1-9]|[2-9]\d)\./.test(options.apiVersion || '');
     this._commandKey = typeof options.commandKey === 'function' ? options.commandKey : (name) => 'action.' + name;
     this._registrations = [];
     this._controller = null;
@@ -56,6 +57,7 @@ export class LocalScmExtensionSession {
         git: this._context.scm && this._context.scm.git || {},
         decorations: this._decorations,
         commands: this._commands,
+        enhancedView: this._enhancedView,
         translate: this._translate,
         publish: (state) => this._view.setState(state)
       });
@@ -86,6 +88,14 @@ export class LocalScmExtensionSession {
     if (invocation && typeof invocation === 'object' && !Array.isArray(invocation) &&
         invocation.sourceControlId && invocation.sourceControlId !== this._sourceControlId) {
       return { ok: false, ignored: true };
+    }
+    // Network Git commands can outlive the host's short command-RPC timeout.
+    // State updates carry progress and the final outcome while the Worker
+    // returns promptly; a timeout must never imply that Git was cancelled.
+    if ([this._commands.clone, this._commands.publish, this._commands.fetch,
+      this._commands.pull, this._commands.push].includes(command)) {
+      void this._controller.handleCommand(command, invocation).catch(() => {});
+      return { ok: true, pending: true };
     }
     const result = await this._controller.handleCommand(command, invocation);
     if (result && result.ok === false && result.error && typeof result.error === 'object') {

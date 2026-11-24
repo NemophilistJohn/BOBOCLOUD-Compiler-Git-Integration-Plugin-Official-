@@ -8,7 +8,7 @@ reads, writes, or synchronizes a cloud workspace.
 
 The versioned installable artifact is kept at:
 
-`artifacts/bobocloud.local-scm-1.2.1.boboplugin`
+`artifacts/bobocloud.local-scm-2.0.0.boboplugin`
 
 Build and verify it from this directory:
 
@@ -53,6 +53,15 @@ state and Refresh. In Chinese this is: `当前无 Git 环境，请安装 Git 并
   first commit message; the broker then stages the workspace, commits, sets
   `origin`, and pushes with upstream tracking.
 - Stage individual files or all local changes, commit, fetch, pull, and push.
+- On Plugin API 1.11 or newer, select a changed file to inspect a bounded
+  colored patch and use the independent row button to stage or unstage it.
+  Older hosts retain the original row-click staging behavior.
+- See configured remotes, remote branches, upstream, and local ahead/behind
+  counts; add or update a remote without leaving the workbench. Counts reflect
+  the last fetched references, not a live remote query.
+- Commit locally before publishing, including on a repository without its
+  first commit. Network operations run in the background and show their result;
+  a timeout or partial initial publication is explicitly reported.
 - Create, delete, and check out local branches.
 - Load status and history through bounded `offset` / `nextOffset` pagination.
 - Publish data-only static file decorations for local SCM state, with an

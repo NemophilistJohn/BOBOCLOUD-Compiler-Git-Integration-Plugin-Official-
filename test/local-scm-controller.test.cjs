@@ -41,7 +41,9 @@ function commandIds() {
     selectRepository: prefix + 'selectRepository',
     loadMoreChanges: prefix + 'loadMoreChanges',
     loadMoreHistory: prefix + 'loadMoreHistory',
-    toggleDecorations: prefix + 'toggleDecorations'
+    toggleDecorations: prefix + 'toggleDecorations',
+    viewDiff: prefix + 'viewDiff',
+    setRemote: prefix + 'setRemote'
   });
 }
 
@@ -131,6 +133,7 @@ function readyBroker(options = {}) {
     async fetch(args) { calls.push(['fetch', args]); return { repositoryId: REPOSITORY_ID, remote: 'origin', branch: 'main', output: '' }; },
     async pull(args) { calls.push(['pull', args]); return { repositoryId: REPOSITORY_ID, remote: 'origin', branch: 'main', output: '' }; },
     async push(args) { calls.push(['push', args]); return { repositoryId: REPOSITORY_ID, remote: 'origin', branch: 'main', output: '' }; },
+    async diff(args) { calls.push(['diff', args]); return { repositoryId: REPOSITORY_ID, content: '@@ -1 +1 @@\n-old\n+new\n' }; },
     async checkout(args) { calls.push(['checkout', args]); return { repositoryId: REPOSITORY_ID, branch: args.branch }; },
     async createBranch(args) { calls.push(['createBranch', args]); return { repositoryId: REPOSITORY_ID, branch: args.name, checkedOut: args.checkout }; },
     async deleteBranch(args) { calls.push(['deleteBranch', args]); return { repositoryId: REPOSITORY_ID, branch: args.name, deleted: true }; },
@@ -141,7 +144,7 @@ function readyBroker(options = {}) {
   return broker;
 }
 
-function createHarness(git, locale = 'en') {
+function createHarness(git, locale = 'en', enhancedView = false) {
   const snapshots = [];
   const decorationSets = [];
   const decorationClears = [];
@@ -149,6 +152,7 @@ function createHarness(git, locale = 'en') {
     git,
     translate: api.createTranslator({ en: messages('en'), 'zh-CN': messages('zh-CN'), ja: messages('ja') }, locale),
     commands: commandIds(),
+    enhancedView,
     publish: async (state) => snapshots.push(state),
     decorations: {
       async set(entries) { decorationSets.push(entries); },
@@ -391,11 +395,11 @@ test('a failed repository mutation preserves the current status and history cont
   assert.equal(result.ok, false);
   assert.deepEqual(result.error, {
     code: 'SCM_GIT_AUTH_REQUIRED',
-    message: '无法在本地工作区完成该操作。请刷新后重试。'
+    message: '请配置本机凭据管理器或 SSH agent 后重试；此处无法弹出交互式凭据提示。'
   });
   assert.equal(Object.getPrototypeOf(result.error), Object.prototype);
   assert.equal(state.phase, 'ready');
-  assert.equal(state.message, '无法在本地工作区完成该操作。请刷新后重试。');
+  assert.equal(state.message, '请配置本机凭据管理器或 SSH agent 后重试；此处无法弹出交互式凭据提示。');
   assert.equal(section(state, 'staged').items.length, 1);
   assert.equal(section(state, 'history').items.length, 2);
   assert.equal(state.actions.some((item) => item.id === 'push'), true);
@@ -439,4 +443,61 @@ test('a nonempty-workspace clone response remains local and tells the user why i
   assert.equal(state.title, '本地工作区不是空目录');
   assert.match(state.message, /空的本地工作区/);
   assert.deepEqual(state.actions.map((item) => item.command), ['bobocloud.local-scm.refresh']);
+});
+
+test('blank optional branch and multiline commit work with the configured upstream', async () => {
+  const git = readyBroker();
+  const { controller } = createHarness(git);
+  await controller.start();
+  assert.equal((await controller.commit('Title\n\nDetails')).ok, true);
+  assert.equal(git.calls.find(([name]) => name === 'commit')[1].message, 'Title\n\nDetails');
+  assert.equal((await controller.push({ remote: '', branch: '' })).ok, true);
+  assert.deepEqual(git.calls.find(([name]) => name === 'push')[1], { repositoryId: REPOSITORY_ID, remote: 'origin' });
+  assert.equal(controller.state.message, 'Push completed.');
+});
+
+test('enhanced rows preview without staging and offer an independent staging action', async () => {
+  const git = readyBroker();
+  const { controller } = createHarness(git, 'en', true);
+  await controller.start();
+  await controller.loadMoreChanges();
+  const file = section(controller.state, 'unstaged').items[0];
+  assert.equal(file.command, commandIds().viewDiff);
+  assert.equal(file.secondaryAction.command, commandIds().stage);
+  await controller.handleCommand(file.command, { itemId: file.id });
+  assert.match(controller.state.detail.content, /\+new/);
+  assert.equal(git.calls.some(([name]) => name === 'stage'), false);
+  await controller.handleCommand(file.secondaryAction.command, { itemId: file.id });
+  assert.deepEqual(git.calls.find(([name]) => name === 'stage')[1].paths, ['README.md']);
+});
+
+test('failed initial publish reloads the repository after the first commit', async () => {
+  const git = readyBroker();
+  let initial = true;
+  const originalStatus = git.status;
+  git.detect = async () => ({ repositories: [{ repositoryId: REPOSITORY_ID, relativeRoot: '', isWorkspaceRoot: true }] });
+  git.status = async (args) => {
+    const page = await originalStatus(args);
+    return { ...page, relativeRoot: '', branch: { ...page.branch, head: 'main', oid: initial ? '(initial)' : 'a'.repeat(40) } };
+  };
+  git.commit = async () => { initial = false; return { repositoryId: REPOSITORY_ID }; };
+  git.push = async () => { throw error('SCM_GIT_AUTH_REQUIRED'); };
+  const { controller } = createHarness(git);
+  await controller.start();
+  assert.equal((await controller.publishInitial({ remote: 'https://example.invalid/a.git', branch: 'main', message: 'First' })).ok, false);
+  assert.equal(controller.state.phase, 'ready');
+  assert.equal(controller.state.actions.some((item) => item.id === 'push'), true);
+  assert.match(controller.state.message, /credential helper/);
+});
+
+test('a successful commit followed by a refresh failure is not reported as a failed commit', async () => {
+  const git = readyBroker();
+  const { controller } = createHarness(git);
+  await controller.start();
+  git.detect = async () => { throw error('SCM_GIT_OPERATION_FAILED'); };
+  const result = await controller.commit('Keep this commit');
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, 'SCM_GIT_REFRESH_AFTER_SUCCESS');
+  assert.match(controller.state.message, /Git completed the operation/);
+  assert.equal(git.calls.filter(([name]) => name === 'commit').length, 1);
 });
