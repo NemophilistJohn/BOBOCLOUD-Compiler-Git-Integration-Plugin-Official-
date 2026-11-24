@@ -43,7 +43,10 @@ function commandIds() {
     loadMoreHistory: prefix + 'loadMoreHistory',
     toggleDecorations: prefix + 'toggleDecorations',
     viewDiff: prefix + 'viewDiff',
-    setRemote: prefix + 'setRemote'
+    setRemote: prefix + 'setRemote',
+    selectPage: prefix + 'selectPage', selectRemote: prefix + 'selectRemote',
+    configureRemote: prefix + 'configureRemote', removeRemote: prefix + 'removeRemote',
+    commitAndPush: prefix + 'commitAndPush', retryPush: prefix + 'retryPush', pushSelected: prefix + 'pushSelected', fetchSelected: prefix + 'fetchSelected'
   });
 }
 
@@ -73,7 +76,7 @@ function readyBroker(options = {}) {
     return {
       repositoryId: REPOSITORY_ID,
       relativeRoot: 'apps/demo',
-      branch: { head: 'main', upstream: 'origin/main', ahead: 1, behind: 0, oid: '0123456789abcdef' },
+      branch: { head: 'main', upstream: 'origin/main', ahead: 1, behind: 0, oid: '0123456789abcdef'.padEnd(40, '0') },
       changes,
       offset,
       limit,
@@ -85,8 +88,10 @@ function readyBroker(options = {}) {
   const commits = Array.from({ length: 5 }, (_value, index) => ({
     hash: String(index).padStart(40, '0'), parents: [], author: { name: 'Local', email: 'local@example.invalid' }, date: '2026-08-17T00:00:00Z', subject: 'Commit ' + index
   }));
+  const configuredRemotes = [{ name: 'origin', urls: ['https://example.invalid/project.git'], pushUrls: ['https://example.invalid/project.git'], label: '', platform: '', selected: false, pushFingerprint: 'f'.repeat(64) }];
   const broker = {
     calls,
+    configuredRemotes,
     async detect() {
       calls.push(['detect']);
       return options.detectResult || { repositories: [descriptor] };
@@ -109,7 +114,7 @@ function readyBroker(options = {}) {
     },
     async remotes(args) {
       calls.push(['remotes', args]);
-      return { repositoryId: REPOSITORY_ID, remotes: [{ name: 'origin', urls: ['https://example.invalid/project.git'] }] };
+      return { repositoryId: REPOSITORY_ID, remotes: configuredRemotes.map((entry) => ({ ...entry })) };
     },
     async history(args) {
       calls.push(['history', args]);
@@ -139,6 +144,16 @@ function readyBroker(options = {}) {
     async deleteBranch(args) { calls.push(['deleteBranch', args]); return { repositoryId: REPOSITORY_ID, branch: args.name, deleted: true }; },
     async init() { calls.push(['init']); return descriptor; },
     async setRemote(args) { calls.push(['setRemote', args]); return { repositoryId: REPOSITORY_ID, name: args.name, url: args.url }; },
+    async configureRemote(args) {
+      calls.push(['configureRemote', args]);
+      let entry = configuredRemotes.find((item) => item.name === args.name);
+      if (args.create) { entry = { name: args.name, urls: [args.url], pushUrls: [args.url], selected: false, pushFingerprint: 'a'.repeat(64) }; configuredRemotes.push(entry); }
+      if (!entry) throw error('SCM_GIT_REMOTE_CONFLICT');
+      for (const key of ['label', 'platform', 'selected']) if (args[key] !== undefined) entry[key] = args[key];
+      if (args.url) entry.urls = [args.url];
+      return { repositoryId: REPOSITORY_ID, name: args.name };
+    },
+    async removeRemote(args) { calls.push(['removeRemote', args]); configuredRemotes.splice(configuredRemotes.findIndex((entry) => entry.name === args.name), 1); return { repositoryId: REPOSITORY_ID, name: args.name, removed: true }; },
     async clone(args) { calls.push(['clone', args]); return descriptor; }
   };
   return broker;
@@ -215,8 +230,8 @@ test('an unborn local repository is ready for its first publish instead of faili
 
   assert.equal(unborn.phase, 'ready');
   assert.match(unborn.message, /no commits yet/);
-  assert.deepEqual(section(unborn, 'history').items, []);
-  assert.equal(unborn.actions.find((item) => item.id === 'publish').placement, 'button');
+  assert.equal(unborn.dashboard.tabs.active, 'changes');
+  assert.equal(unborn.actions.find((item) => item.id === 'commit').placement, 'inline');
   assert.equal(unborn.actions.find((item) => item.id === 'stageAll').placement, 'toolbar');
 
   const result = await controller.publishInitial({
@@ -230,7 +245,7 @@ test('an unborn local repository is ready for its first publish instead of faili
     ['createBranch', 'stageAll', 'commit', 'setRemote', 'push']
   );
   assert.equal(snapshots.at(-1).phase, 'ready');
-  assert.equal(snapshots.at(-1).summary.items.find((item) => item.label === 'Repository address').value, 'https://example.invalid/project.git');
+  assert.equal(snapshots.at(-1).dashboard.items[0].description, 'project');
 });
 
 test('unavailable Git presents a refreshable localized error state', async () => {
@@ -294,7 +309,7 @@ test('nested repository status uses broker offsets, preserves groups, and publis
   const decorations = decorationSets.at(-1);
 
   assert.equal(state.phase, 'ready');
-  assert.equal(state.summary.title, 'Local workspace source control');
+  assert.equal(state.dashboard.tabs.active, 'changes');
   assert.deepEqual(git.calls.filter(([method]) => method === 'status').map(([, args]) => args), [
     { repositoryId: REPOSITORY_ID, offset: 0, limit: 2 },
     { repositoryId: REPOSITORY_ID, offset: 2, limit: 2 },
@@ -330,7 +345,7 @@ test('nested repository status uses broker offsets, preserves groups, and publis
   assert.deepEqual(stageCall[1], { repositoryId: REPOSITORY_ID, paths: ['src/app.js'] });
 });
 
-test('ready state preloads the first history page and continues with broker offsets', async () => {
+test('history page reads the selected remote and paginates its commit graph', async () => {
   const git = readyBroker();
   const { controller, snapshots } = createHarness(git);
   await controller.start();
@@ -342,17 +357,22 @@ test('ready state preloads the first history page and continues with broker offs
     offset: 0,
     limit: 2
   }]);
+  assert.equal(section(state, 'history'), undefined);
+  await controller.selectPage('history');
+  state = snapshots.at(-1);
+  assert.equal(state.dashboard.selectionMode, 'single');
   assert.equal(section(state, 'history').items.length, 2);
   assert.equal(section(state, 'history').loadMore.command, 'bobocloud.local-scm.loadMoreHistory');
 
   await controller.loadMoreHistory();
   state = snapshots.at(-1);
   const historyCalls = git.calls.filter(([method]) => method === 'history');
-  assert.deepEqual(historyCalls[1][1], { repositoryId: REPOSITORY_ID, offset: 2, limit: 2 });
+  assert.deepEqual(historyCalls[1][1], { repositoryId: REPOSITORY_ID, offset: 0, limit: 2, remote: 'origin' });
+  assert.deepEqual(historyCalls[2][1], { repositoryId: REPOSITORY_ID, offset: 2, limit: 2, remote: 'origin' });
   assert.equal(section(state, 'history').items.length, 4);
+  assert.equal(section(state, 'history').items[0].graph.node, 0);
 
-  const featureBranch = section(state, 'branches').items.find((item) => item.title === 'feature/preview');
-  await controller.handleCommand(commandIds().checkout, { itemId: featureBranch.id, values: {} });
+  await controller.checkout('feature/preview');
   assert.deepEqual(git.calls.find(([method]) => method === 'checkout')[1], {
     repositoryId: REPOSITORY_ID,
     branch: 'feature/preview',
@@ -360,10 +380,11 @@ test('ready state preloads the first history page and continues with broker offs
   });
   state = snapshots.at(-1);
   assert.equal(section(state, 'history').items.length, 2);
-  assert.deepEqual(git.calls.filter(([method]) => method === 'history')[2][1], {
+  assert.deepEqual(git.calls.filter(([method]) => method === 'history').at(-1)[1], {
     repositoryId: REPOSITORY_ID,
     offset: 0,
-    limit: 2
+    limit: 2,
+    remote: 'origin'
   });
 
   await controller.createBranch('feature/local-only', true);
@@ -401,8 +422,8 @@ test('a failed repository mutation preserves the current status and history cont
   assert.equal(state.phase, 'ready');
   assert.equal(state.message, '请配置本机凭据管理器或 SSH agent 后重试；此处无法弹出交互式凭据提示。');
   assert.equal(section(state, 'staged').items.length, 1);
-  assert.equal(section(state, 'history').items.length, 2);
-  assert.equal(state.actions.some((item) => item.id === 'push'), true);
+  assert.equal(state.dashboard.tabs.active, 'changes');
+  assert.equal(state.actions.some((item) => item.id === 'commit'), true);
   assert.equal(decorationClears.length, clearsBeforePush);
 });
 
@@ -486,7 +507,7 @@ test('failed initial publish reloads the repository after the first commit', asy
   await controller.start();
   assert.equal((await controller.publishInitial({ remote: 'https://example.invalid/a.git', branch: 'main', message: 'First' })).ok, false);
   assert.equal(controller.state.phase, 'ready');
-  assert.equal(controller.state.actions.some((item) => item.id === 'push'), true);
+  assert.equal(controller.state.actions.some((item) => item.id === 'commit'), true);
   assert.match(controller.state.message, /credential helper/);
 });
 
@@ -502,20 +523,81 @@ test('a successful commit followed by a refresh failure is not reported as a fai
   assert.equal(git.calls.filter(([name]) => name === 'commit').length, 1);
 });
 
-test('older hosts do not push to a wrong branch when the tracked branch has a different name', async () => {
+test('remote card selections persist across controller sessions', async () => {
   const git = readyBroker();
-  const originalStatus = git.status;
-  git.status = async (args) => {
-    const page = await originalStatus(args);
-    return { ...page, branch: { ...page.branch, head: 'local', upstream: 'origin/review' } };
-  };
-  const { controller } = createHarness(git, 'en', false);
+  const { controller } = createHarness(git);
   await controller.start();
-  const result = await controller.push({ remote: '', branch: '' });
-  assert.equal(result.error.code, 'SCM_GIT_UPSTREAM_MISMATCH');
-  assert.equal(git.calls.some(([name]) => name === 'push'), false);
-  assert.match(controller.state.message, /different branch name/);
-  const enhanced = createHarness(git, 'en', true).controller;
-  await enhanced.start();
-  assert.equal((await enhanced.push({ remote: '', branch: '' })).ok, true);
+  const card = controller.state.dashboard.items[0];
+  assert.equal(card.selected, false);
+  await controller.handleCommand(card.command, { itemId: card.id });
+  assert.equal(controller.state.dashboard.items[0].selected, true);
+  const second = createHarness(git).controller;
+  await second.start();
+  assert.equal(second.state.dashboard.items[0].selected, true);
+});
+
+test('multi-remote commit happens once, reports individual failures, and retries only failed pushes', async () => {
+  const git = readyBroker();
+  git.configuredRemotes[0].selected = true;
+  git.configuredRemotes.push({ name: 'mirror', urls: ['https://example.invalid/mirror.git'], label: 'Mirror', platform: 'Git', selected: true, pushFingerprint: 'e'.repeat(64) });
+  let mirrorFails = true;
+  git.push = async (args) => { git.calls.push(['push', args]); if (args.remote === 'mirror' && mirrorFails) throw error('SCM_GIT_AUTH_REQUIRED'); return { output: '' }; };
+  const { controller } = createHarness(git);
+  await controller.start();
+  assert.equal((await controller.commitAndPush('Ship once\n\nDetails')).ok, true);
+  assert.equal(git.calls.filter(([name]) => name === 'commit').length, 1);
+  assert.equal(git.calls.find(([name]) => name === 'commit')[1].expectedBranch, 'main');
+  assert.deepEqual(git.calls.filter(([name]) => name === 'push').map(([, args]) => args.remote), ['origin', 'mirror']);
+  assert.equal(git.calls.find(([name]) => name === 'push')[1].expectedHead, 'a'.repeat(40));
+  assert.equal(git.calls.find(([name]) => name === 'push')[1].expectedBranch, 'main');
+  assert.deepEqual(section(controller.state, 'results').items.map((item) => item.badge), ['Pushed', 'Failed']);
+  mirrorFails = false;
+  await controller.retryPush();
+  assert.equal(git.calls.filter(([name]) => name === 'commit').length, 1);
+  assert.deepEqual(git.calls.filter(([name]) => name === 'push').map(([, args]) => args.remote), ['origin', 'mirror', 'mirror']);
+  assert.deepEqual(section(controller.state, 'results').items.map((item) => item.badge), ['Pushed', 'Pushed']);
+});
+
+test('an unknown push outcome is not automatically retried', async () => {
+  const git = readyBroker();
+  git.configuredRemotes[0].selected = true;
+  git.push = async (args) => { git.calls.push(['push', args]); throw error('SCM_GIT_OUTCOME_UNKNOWN'); };
+  const { controller } = createHarness(git);
+  await controller.start();
+  await controller.commitAndPush('One commit');
+  assert.equal(section(controller.state, 'results').items[0].badge, 'Unconfirmed');
+  assert.equal(controller.state.actions.some((item) => item.id === 'retryPush'), false);
+  await controller.retryPush();
+  assert.equal(git.calls.filter(([name]) => name === 'push').length, 1);
+});
+
+test('repeated commit-and-push requests cannot create duplicate commits', async () => {
+  const git = readyBroker();
+  git.configuredRemotes[0].selected = true;
+  let release;
+  const barrier = new Promise((resolve) => { release = resolve; });
+  git.commit = async (args) => { git.calls.push(['commit', args]); await barrier; return { commit: 'a'.repeat(40) }; };
+  const { controller } = createHarness(git);
+  await controller.start();
+  const first = controller.commitAndPush('One commit');
+  const duplicate = await controller.commitAndPush('One commit');
+  assert.equal(duplicate.ignored, true);
+  release();
+  await first;
+  assert.equal(git.calls.filter(([name]) => name === 'commit').length, 1);
+});
+
+test('vertical graph retains separate lanes through a merge', async () => {
+  const { buildCommitGraph } = await import(pathToFileURL(path.join(ROOT, 'src', 'local-scm-dashboard.mjs')).href);
+  const rows = buildCommitGraph([
+    { hash: 'merge', parents: ['main', 'feature'] },
+    { hash: 'feature', parents: ['base'] },
+    { hash: 'main', parents: ['base'] },
+    { hash: 'base', parents: [] }
+  ]);
+  assert.equal(rows[0].links.filter((link) => link.viaNode).length, 2);
+  assert.equal(rows[1].incoming, true);
+  assert.equal(rows[2].incoming, true);
+  assert.equal(rows[3].links.length, 0);
+  assert.ok(rows.every((row) => row.width >= 1 && row.width <= 12 && row.node < row.width));
 });

@@ -1,91 +1,26 @@
-# BOBOCloud Local Source Control
+# BOBOCloud Local Source Control 3.0
 
-`bobocloud.local-scm` is the official source-control plugin for a BOBOCloud
-**local workspace**. It uses the host-provided local Git broker and never
-reads, writes, or synchronizes a cloud workspace.
+`bobocloud.local-scm` provides Git source control for the active **local**
+workspace. It uses the host's structured Git broker and does not operate on
+cloud workspaces. Version 3.0 requires Plugin API 1.12.0 or newer within 1.x.
 
-## Install And Package
+The sidebar keeps remote cards and page tabs visible above the working area.
+Cards can be added, edited or removed; their labels, platform and multi-select
+state are stored in the local repository's Git configuration. The local changes
+page offers staging, a local commit and commit-and-push to selected remotes.
+The commit happens once, followed by separate pushes and per-remote results.
+The broker checks the expected commit and push destination immediately before
+each push. An unknown outcome is not automatically retried.
 
-The versioned installable artifact is kept at:
+The commits and branches page uses one selected remote and draws a vertical
+graph of commits reachable from its fetched remote branches. Its contents
+are based on the last fetched references; use Fetch to update them. Removing a
+card removes its Git remote and local remote-tracking references, not the hosted
+repository or local source files. Git must be available on PATH; authentication
+uses the local Git credential helper or SSH agent.
 
-`artifacts/bobocloud.local-scm-2.0.1.boboplugin`
-
-Build and verify it from this directory:
-
-```powershell
-npm install
-npm run package
-```
-
-`npm run package` builds the single Worker entry, copies the private locale
-files, generates SHA-256 entries in `plugin/manifest.json`, runs the Node
-tests, creates the `.boboplugin` archive, and verifies its central directory
-against the integrity manifest. The unpacked `plugin/` directory is generated
-and ignored; `artifacts/` contains the intentionally versioned installable
-file.
-
-Install the archive through BOBOCloud's Extensions view. BOBOCloud enables the
-declared local source-control permissions by default; each permission remains
-individually revocable from the extension detail tab.
-
-## Requirements And Boundary
-
-- Git must be installed and available on the desktop application's `PATH`.
-- Clone writes only to an empty active local workspace.
-- Repository discovery includes nested local repositories.
-- There is no direct DOM, network, shell, child-process, rclone, or cloud-sync
-  implementation in this package. All Git operations go through the bounded
-  `context.scm.git` host broker.
-- The plugin does not create hosted pull requests and does not expose a cloud
-  pull-request API.
-
-When Git is absent, the source-control view exposes only the localized error
-state and Refresh. In Chinese this is: `当前无 Git 环境，请安装 Git 并配置 PATH 后刷新。`
-
-## Supported Local Operations
-
-- Detect and initialize repositories; clone HTTPS or SSH remotes into an empty
-  local workspace.
-- View staged, unstaged, untracked, and conflicted files, including bounded
-  `+N -N` line statistics when the broker can safely provide them.
-- For a local repository without a first commit, show an explicit **Initialize
-  and publish** flow: choose the remote HTTPS/SSH address, initial branch, and
-  first commit message; the broker then stages the workspace, commits, sets
-  `origin`, and pushes with upstream tracking.
-- Stage individual files or all local changes, commit, fetch, pull, and push.
-- On Plugin API 1.11 or newer, select a changed file to inspect a bounded
-  colored patch and use the independent row button to stage or unstage it.
-  Older hosts retain the original row-click staging behavior.
-- See configured remotes, remote branches, upstream, and local ahead/behind
-  counts; add or update a remote without leaving the workbench. Counts reflect
-  the last fetched references, not a live remote query.
-- Commit locally before publishing, including on a repository without its
-  first commit. Network operations run in the background and show their result;
-  a timeout or partial initial publication is explicitly reported.
-- Create, delete, and check out local branches.
-- Load status and history through bounded `offset` / `nextOffset` pagination.
-- Publish data-only static file decorations for local SCM state, with an
-  immediate Show/Hide toggle in the source-control sidebar.
-
-The sidebar keeps common actions in a compact host-owned icon toolbar. Less
-frequent repository operations are in the host **More** menu; the package does
-not inject its own SVG, CSS, or DOM.
-
-## Localization And Permissions
-
-All runtime strings are private to this package under `locales/`:
-`en.json`, `zh-CN.json`, and `ja.json`. The plugin uses the injected
-`context.i18n` service and never changes BOBOCloud's core language packs.
-
-The manifest requests only these host permissions:
-
-- `commands.register`
-- `sourceControl.register`
-- `fileDecorations.scm`
-- `scm.git.read`
-- `scm.git.write`
-
-The host uses these declarations as the package's capability ceiling, enables
-them after verified installation, and lets the user revoke them later.
-Repository IDs and file-operation targets remain in Worker-owned state; the
-rendered host gets only bounded, data-only source-control state.
+The installable artifact is `artifacts/bobocloud.local-scm-3.0.0.boboplugin`.
+Run `npm install` followed by `npm run package` to build it, run its tests and
+verify archive integrity. The host renders all UI from bounded data; the Worker
+has no DOM, shell, arbitrary network, or direct filesystem access. Localized
+strings are provided in English, Simplified Chinese and Japanese.

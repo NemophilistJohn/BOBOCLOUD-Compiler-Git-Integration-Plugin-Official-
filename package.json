@@ -1,6 +1,6 @@
 {
   "name": "@bobocloud/official-local-scm-plugin",
-  "version": "2.0.1",
+  "version": "3.0.0",
   "private": true,
   "description": "Official local-only source-control plugin package for BOBOCloud.",
   "type": "module",

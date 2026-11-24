@@ -28,7 +28,15 @@ const COMMANDS = Object.freeze({
   loadMoreHistory: EXTENSION_ID + '.loadMoreHistory',
   toggleDecorations: EXTENSION_ID + '.toggleDecorations',
   viewDiff: EXTENSION_ID + '.viewDiff',
-  setRemote: EXTENSION_ID + '.setRemote'
+  setRemote: EXTENSION_ID + '.setRemote',
+  selectPage: EXTENSION_ID + '.selectPage',
+  selectRemote: EXTENSION_ID + '.selectRemote',
+  configureRemote: EXTENSION_ID + '.configureRemote',
+  removeRemote: EXTENSION_ID + '.removeRemote',
+  commitAndPush: EXTENSION_ID + '.commitAndPush',
+  retryPush: EXTENSION_ID + '.retryPush',
+  pushSelected: EXTENSION_ID + '.pushSelected',
+  fetchSelected: EXTENSION_ID + '.fetchSelected'
 });
 
 const LOCALES = Object.freeze({ en, 'zh-CN': zhCN, ja });
@@ -52,8 +60,7 @@ export async function activate(context) {
     translate: t,
     sourceControlId: SOURCE_CONTROL_ID,
     decorationId: DECORATION_ID,
-    commandKey: commandKeyFor,
-    apiVersion: context.apiVersion
+    commandKey: commandKeyFor
   });
   await session.start();
   activeSession = session;

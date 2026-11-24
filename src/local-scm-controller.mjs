@@ -1,3 +1,5 @@
+import { buildCommitGraph, remotePresentation } from './local-scm-dashboard.mjs';
+
 const DEFAULT_CHANGE_PAGE_SIZE = 60;
 const DEFAULT_HISTORY_PAGE_SIZE = 30;
 // The generic source-control host validates each section independently. Keep
@@ -213,6 +215,11 @@ export function classifyScmError(error, operation = '') {
   if (code === 'SCM_GIT_OUTCOME_UNKNOWN') return 'outcomeUnknown';
   if (code === 'SCM_GIT_REFRESH_AFTER_SUCCESS') return 'refreshAfterSuccess';
   if (code === 'SCM_GIT_UPSTREAM_MISMATCH') return 'upstreamMismatch';
+  if (code === 'SCM_GIT_TARGET_INVALID') return 'targetInvalid';
+  if (code === 'SCM_GIT_REMOTE_CHANGED') return 'remoteChanged';
+  if (code === 'SCM_GIT_HEAD_CHANGED') return 'headChanged';
+  if (code === 'SCM_GIT_REMOTE_CONFLICT') return 'remoteConflict';
+  if (code === 'SCM_GIT_CONFIRM_REQUIRED') return 'confirmRequired';
   if (code === 'SCM_GIT_REMOTE_DENIED') return operation === 'clone' ? 'remoteInvalid' : 'remoteUnavailable';
   if (operation === 'clone' && code === 'SCM_GIT_WORKSPACE_NOT_EMPTY') return 'workspaceNotEmpty';
   if (operation === 'clone' && (code === 'SCM_GIT_REMOTE_DENIED' || code === 'SCM_GIT_AUTH_REQUIRED' ||
@@ -369,8 +376,14 @@ export class LocalScmController {
     this._decorations = options.decorations || null;
     this._t = typeof options.translate === 'function' ? options.translate : (key) => key;
     this._commands = Object.freeze({ ...options.commands });
-    this._enhancedView = options.enhancedView === true;
+    this._enhancedView = true;
     this._detail = null;
+    this._page = 'changes';
+    this._viewRemote = '';
+    this._pushResults = [];
+    this._lastPush = null;
+    this._completedAction = '';
+    this._batchPending = false;
     this._changePageSize = pageSize(options.changePageSize, DEFAULT_CHANGE_PAGE_SIZE);
     this._historyPageSize = pageSize(options.historyPageSize, DEFAULT_HISTORY_PAGE_SIZE);
     this._queue = Promise.resolve();
@@ -431,6 +444,7 @@ export class LocalScmController {
           return { ok: true, phase: this._phase };
         }
         if (!repositories.some((item) => item.repositoryId === this._activeRepositoryId)) {
+          this._viewRemote = ''; this._lastPush = null; this._pushResults = [];
           const workspaceRoot = repositories.find((item) => item.isWorkspaceRoot);
           this._activeRepositoryId = (workspaceRoot || repositories[0]).repositoryId;
         }
@@ -447,6 +461,7 @@ export class LocalScmController {
       try {
         const id = repositoryId(value);
         if (!this._repositories.some((item) => item.repositoryId === id)) throw new TypeError('Repository is not available in this local workspace.');
+        if (this._activeRepositoryId !== id) { this._viewRemote = ''; this._lastPush = null; this._pushResults = []; }
         this._activeRepositoryId = id;
         await this._setLoading();
         await this._loadActiveRepository(true);
@@ -608,6 +623,198 @@ export class LocalScmController {
     });
   }
 
+  configureRemote(target, values = {}) {
+    return this._enqueue(async () => {
+      try {
+        const creating = !target;
+        const name = remoteName(creating ? values.name : target.name);
+        if (!name) throw new TypeError('A remote name is required.');
+        const label = optionalString(values.label, 'Remote label', 96);
+        const platform = optionalString(values.platform, 'Remote platform', 64);
+        if (!label || !platform) throw new TypeError('A card name and platform are required.');
+        const args = { repositoryId: this._active(), name, create: creating, label, platform };
+        if (values.url) args.url = validateRemoteAddress(values.url);
+        if (creating && !args.url) throw new TypeError('A remote address is required.');
+        await this._setLoading('setRemote');
+        await this._requireGitMethod('configureRemote')(args);
+        await this._refreshAfterSuccess();
+        this._notice = 'notice.remoteSaved';
+        await this._emit();
+        return { ok: true };
+      } catch (error) {
+        try { if (this._activeRepositoryId) await this._refreshAfterMutation(); } catch (_) {}
+        return this._showError(error, 'setRemote');
+      }
+    });
+  }
+
+  removeRemote(target, values = {}) {
+    return this._enqueue(async () => {
+      try {
+        if (!target || values.confirm !== true) { const error = new Error('Confirm removal of the remote.'); error.code = 'SCM_GIT_CONFIRM_REQUIRED'; throw error; }
+        await this._setLoading('removeRemote');
+        await this._requireGitMethod('removeRemote')({ repositoryId: this._active(), name: remoteName(target.name) });
+        if (this._viewRemote === target.name) this._viewRemote = '';
+        await this._refreshAfterSuccess();
+        this._notice = 'notice.remoteRemoved';
+        await this._emit();
+        return { ok: true };
+      } catch (error) { return this._showError(error, 'removeRemote'); }
+    });
+  }
+
+  selectRemote(target) {
+    return this._enqueue(async () => {
+      try {
+        const list = Array.isArray(this._remotes?.remotes) ? this._remotes.remotes : [];
+        const remote = list.find((entry) => entry.name === target?.name);
+        if (!remote) throw new TypeError('The remote is no longer available.');
+        if (this._page === 'history') {
+          this._viewRemote = remote.name;
+          await this._setLoading('history');
+          await this._loadRemoteHistory();
+          this._phase = LocalScmPhase.READY;
+        } else {
+          await this._setLoading('selection');
+          await this._requireGitMethod('configureRemote')({ repositoryId: this._active(), name: remote.name, create: false, selected: remote.selected !== true });
+          this._remotes = await this._requireGitMethod('remotes')({ repositoryId: this._active() });
+          this._phase = LocalScmPhase.READY;
+        }
+        await this._emit();
+        return { ok: true };
+      } catch (error) { return this._showError(error, 'selectRemote'); }
+    });
+  }
+
+  selectPage(page) {
+    return this._enqueue(async () => {
+      try {
+        if (page !== 'changes' && page !== 'history') throw new TypeError('Source-control page is invalid.');
+        this._page = page;
+        this._detail = null;
+        if (page === 'history') {
+          await this._setLoading('history');
+          await this._loadRemoteHistory();
+          this._phase = LocalScmPhase.READY;
+        }
+        await this._emit();
+        return { ok: true };
+      } catch (error) { return this._showError(error, 'history'); }
+    });
+  }
+
+  async _loadRemoteHistory() {
+    const remotes = Array.isArray(this._remotes?.remotes) ? this._remotes.remotes : [];
+    if (!remotes.some((entry) => entry.name === this._viewRemote)) this._viewRemote = remotes[0]?.name || '';
+    const request = { repositoryId: this._active(), offset: 0, limit: this._historyPageSize };
+    if (this._viewRemote) request.remote = this._viewRemote;
+    const history = await this._requireGitMethod('history')(request);
+    this._resetHistoryPages();
+    this._appendHistoryPage(normalizeHistoryPage(history, this._active(), 0, this._historyPageSize));
+  }
+
+  commitAndPush(message) {
+    if (this._batchPending) return Promise.resolve({ ok: false, ignored: true });
+    this._batchPending = true;
+    return this._enqueue(async () => {
+      try {
+        const text = commitMessage(message);
+        const targets = (Array.isArray(this._remotes?.remotes) ? this._remotes.remotes : [])
+          .filter((entry) => entry.selected === true)
+          .map((entry) => ({ name: remoteName(entry.name), fingerprint: entry.pushFingerprint, label: remotePresentation(entry).title }));
+        if (!targets.length || targets.some((entry) => !/^[a-f0-9]{64}$/.test(entry.fingerprint || ''))) {
+          const error = new Error('Select remotes with one supported push destination.'); error.code = 'SCM_GIT_TARGET_INVALID'; throw error;
+        }
+        const branch = this._status?.branch?.head;
+        const baseHead = this._status?.branch?.oid;
+        if (!branch || branch === '(detached)' || !/^(?:\(initial\)|[a-f0-9]{40}(?:[a-f0-9]{24})?)$/i.test(baseHead || '')) { const error = new Error('Refresh the current branch before committing.'); error.code = 'SCM_GIT_HEAD_CHANGED'; throw error; }
+        const repository = this._active();
+        await this._setLoading('commitAndPush');
+        const committed = await this._requireGitMethod('commit')({ repositoryId: repository, message: text, expectedBranch: branch, expectedHead: baseHead });
+        if (!committed || !/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/i.test(committed.commit || '')) {
+          const error = new Error('Commit result could not be verified.'); error.code = 'SCM_GIT_OUTCOME_UNKNOWN'; throw error;
+        }
+        this._completedAction = 'commit';
+        const batch = this._lastPush = { repositoryId: repository, head: committed.commit, branch, targets, createdCommit: true };
+        await this._runPushTargets(targets);
+        await this._refreshAfterSuccess();
+        if (this._lastPush !== batch) return { ok: true, stale: true };
+        this._notice = 'notice.batchFinished';
+        await this._emit();
+        return { ok: true };
+      } catch (error) { return this._showError(error, 'commitAndPush'); }
+    }).finally(() => { this._batchPending = false; });
+  }
+
+  retryPush() {
+    if (this._batchPending) return Promise.resolve({ ok: false, ignored: true });
+    this._batchPending = true;
+    return this._enqueue(async () => {
+      try {
+        if (!this._lastPush || this._lastPush.repositoryId !== this._active()) throw new TypeError('The previous push is no longer available.');
+        const retry = this._pushResults.filter((result) => result.status === 'failed').map((result) => result.target);
+        if (!retry.length) return { ok: true };
+        const batch = this._lastPush;
+        await this._setLoading('retryPush');
+        await this._runPushTargets(retry, true);
+        await this._refreshAfterSuccess();
+        if (this._lastPush !== batch) return { ok: true, stale: true };
+        this._notice = batch.createdCommit ? 'notice.batchFinished' : 'notice.pushSelectedFinished';
+        await this._emit();
+        return { ok: true };
+      } catch (error) { return this._showError(error, 'retryPush'); }
+    }).finally(() => { this._batchPending = false; });
+  }
+
+  pushSelected() {
+    if (this._batchPending) return Promise.resolve({ ok: false, ignored: true });
+    this._batchPending = true;
+    return this._enqueue(async () => {
+      try {
+        const targets = (Array.isArray(this._remotes?.remotes) ? this._remotes.remotes : []).filter((entry) => entry.selected === true)
+          .map((entry) => ({ name: remoteName(entry.name), fingerprint: entry.pushFingerprint, label: remotePresentation(entry).title }));
+        if (!targets.length || targets.some((entry) => !/^[a-f0-9]{64}$/.test(entry.fingerprint || ''))) {
+          const error = new Error('Select remotes with one supported push destination.'); error.code = 'SCM_GIT_TARGET_INVALID'; throw error;
+        }
+        const head = this._status?.branch?.oid;
+        const branch = this._status?.branch?.head;
+        if (!/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/i.test(head || '') || !branch || branch === '(detached)') {
+          const error = new Error('Select a branch before pushing.'); error.code = 'SCM_GIT_HEAD_CHANGED'; throw error;
+        }
+        const batch = this._lastPush = { repositoryId: this._active(), head, branch, targets, createdCommit: false };
+        await this._setLoading('pushSelected');
+        await this._runPushTargets(targets);
+        await this._refreshAfterSuccess();
+        if (this._lastPush !== batch) return { ok: true, stale: true };
+        this._notice = 'notice.pushSelectedFinished';
+        await this._emit();
+        return { ok: true };
+      } catch (error) { return this._showError(error, 'pushSelected'); }
+    }).finally(() => { this._batchPending = false; });
+  }
+
+  async _runPushTargets(targets, retry = false) {
+    const batch = this._lastPush;
+    if (!retry) this._pushResults = targets.map((target) => ({ target, status: 'waiting', code: '' }));
+    let stop = false;
+    for (const target of targets) {
+      const result = this._pushResults.find((entry) => entry.target.name === target.name);
+      if (!result) continue;
+      if (stop || this._lastPush !== batch) { result.status = 'skipped'; continue; }
+      result.status = 'running'; result.code = '';
+      await this._emit();
+      try {
+        await this._requireGitMethod('push')({ repositoryId: batch.repositoryId, remote: target.name, expectedHead: batch.head, expectedBranch: batch.branch, expectedTarget: target.fingerprint });
+        result.status = 'success';
+      } catch (error) {
+        result.code = errorCode(error) || 'SCM_GIT_OPERATION_FAILED';
+        result.status = result.code === 'SCM_GIT_OUTCOME_UNKNOWN' ? 'unknown' : 'failed';
+        if (result.code === 'SCM_GIT_STALE_REPOSITORY' || result.code === 'SCM_GIT_HEAD_CHANGED') stop = true;
+      }
+      await this._emit();
+    }
+  }
+
   viewDiff(target) {
     return this._enqueue(async () => {
       try {
@@ -693,7 +900,9 @@ export class LocalScmController {
         if (this._phase !== LocalScmPhase.READY || !this._canLoadMoreHistory()) return { ok: true };
         const offset = this._historyNextOffset;
         const limit = Math.min(this._historyPageSize, MAX_VISIBLE_SECTION_ITEMS - this._history.length);
-        const result = await this._requireGitMethod('history')({ repositoryId: this._active(), offset, limit });
+        const args = { repositoryId: this._active(), offset, limit };
+        if (this._page === 'history' && this._viewRemote) args.remote = this._viewRemote;
+        const result = await this._requireGitMethod('history')(args);
         const historyPage = normalizeHistoryPage(result, this._active(), offset, limit);
         this._appendHistoryPage(historyPage);
         await this._emit();
@@ -739,6 +948,14 @@ export class LocalScmController {
       return this.unstage([target.path]);
     }
     if (command === this._commands.viewDiff && target && target.kind === 'change') return this.viewDiff(target);
+    if (command === this._commands.selectRemote && target && target.kind === 'remote') return this.selectRemote(target);
+    if (command === this._commands.configureRemote) return this.configureRemote(target && target.kind === 'remote' ? target : null, values);
+    if (command === this._commands.removeRemote) return this.removeRemote(target && target.kind === 'remote' ? target : null, values);
+    if (command === this._commands.selectPage) return this.selectPage(event.itemId);
+    if (command === this._commands.commitAndPush) return this.commitAndPush(values.message);
+    if (command === this._commands.retryPush) return this.retryPush();
+    if (command === this._commands.pushSelected) return this.pushSelected();
+    if (command === this._commands.fetchSelected) return this.fetch({ remote: this._viewRemote });
     if (command === this._commands.refresh) return this.refresh();
     if (command === this._commands.initialize) return this.initializeRepository();
     if (command === this._commands.clone) return this.cloneRemote(values.remote);
@@ -780,13 +997,6 @@ export class LocalScmController {
         const trackedRemote = configured.find((entry) => entry && typeof entry.name === 'string' && upstream.startsWith(entry.name + '/'));
         const remote = remoteName(input.remote) || (trackedRemote && trackedRemote.name) || (configured[0] && configured[0].name);
         const branch = input.branch === undefined || input.branch === null || input.branch === '' ? undefined : branchName(input.branch);
-        const currentBranch = this._status && this._status.branch && this._status.branch.head || '';
-        if (method === 'push' && !this._enhancedView && !branch && trackedRemote && remote === trackedRemote.name &&
-            upstream.slice(trackedRemote.name.length + 1) !== currentBranch) {
-          const error = new Error('The installed host cannot safely push to a differently named upstream branch.');
-          error.code = 'SCM_GIT_UPSTREAM_MISMATCH';
-          throw error;
-        }
         const args = { repositoryId: this._active() };
         if (remote) args.remote = remote;
         if (branch) args.branch = branch;
@@ -833,6 +1043,7 @@ export class LocalScmController {
       return;
     }
     if (!this._repositories.some((item) => item.repositoryId === this._activeRepositoryId)) {
+      this._viewRemote = ''; this._lastPush = null; this._pushResults = [];
       this._activeRepositoryId = this._repositories[0].repositoryId;
     }
     await this._loadActiveRepository(true);
@@ -864,6 +1075,7 @@ export class LocalScmController {
     if (loadInitialHistory) {
       this._appendHistoryPage(normalizeHistoryPage(history, id, 0, historyLimit));
     }
+    if (this._page === 'history') await this._loadRemoteHistory();
     this._phase = LocalScmPhase.READY;
     this._error = null;
     await this._publishDecorations();
@@ -873,6 +1085,9 @@ export class LocalScmController {
   _resetRepositoryData() {
     this._status = null;
     this._detail = null;
+    this._viewRemote = '';
+    this._lastPush = null;
+    this._pushResults = [];
     this._branches = null;
     this._remotes = null;
     this._resetStatusPages();
@@ -940,6 +1155,7 @@ export class LocalScmController {
     this._notice = '';
     this._operation = operation;
     this._publishCommitted = false;
+    this._completedAction = '';
     await this._emit();
   }
 
@@ -977,8 +1193,7 @@ export class LocalScmController {
 
   async _showError(error, operation) {
     const canPreserveRepository = Boolean(this._activeRepositoryId && this._status) &&
-      operation !== 'refresh' && operation !== 'select' && operation !== 'status' &&
-      operation !== 'history' && operation !== 'init' && operation !== 'clone';
+      operation !== 'refresh' && operation !== 'select' && operation !== 'init' && operation !== 'clone';
     if (canPreserveRepository) {
       this._phase = LocalScmPhase.READY;
       this._error = this._errorState(classifyScmError(error, operation), error);
@@ -1033,6 +1248,16 @@ export class LocalScmController {
              ? ['state.refreshAfterSuccess.title', 'state.refreshAfterSuccess.message']
           : kind === 'upstreamMismatch'
              ? ['state.upstreamMismatch.title', 'state.upstreamMismatch.message']
+          : kind === 'targetInvalid'
+             ? ['state.targetInvalid.title', 'state.targetInvalid.message']
+          : kind === 'remoteChanged'
+             ? ['state.remoteChanged.title', 'state.remoteChanged.message']
+          : kind === 'headChanged'
+             ? ['state.headChanged.title', 'state.headChanged.message']
+          : kind === 'remoteConflict'
+             ? ['state.remoteConflict.title', 'state.remoteConflict.message']
+          : kind === 'confirmRequired'
+             ? ['state.confirmRequired.title', 'state.confirmRequired.message']
           : ['state.operationFailed.title', 'state.operationFailed.message'];
   }
 
@@ -1087,17 +1312,9 @@ export class LocalScmController {
         message: this._t('state.empty.message'),
         actions: [
           action('refresh', this._t('action.refresh'), this._commands.refresh, { placement: 'toolbar', icon: 'refresh' }),
-          action('publish', this._t('action.publish'), this._commands.publish, {
-            kind: 'primary',
-            form: form(this._t('form.publish.title'), this._t('action.publish'), [
-              textField('remote', this._t('field.remote'), { required: true, maxLength: 2048 }),
-              textField('branch', this._t('field.branch'), { required: true, value: 'main', maxLength: 120 }),
-              textField('message', this._t('field.initialCommitMessage'), { type: 'textarea', required: true, value: this._t('field.initialCommitDefault'), maxLength: 4096 })
-            ])
-          }),
-          action('initialize', this._t('action.initialize'), this._commands.initialize, { placement: 'menu', icon: 'stage-all' }),
+          action('initialize', this._t('action.initialize'), this._commands.initialize, { kind: 'primary', icon: 'stage-all' }),
           action('clone', this._t('action.clone'), this._commands.clone, {
-            placement: 'menu',
+            placement: 'button',
             icon: 'remote',
             form: form(this._t('form.clone.title'), this._t('action.clone'), [
               textField('remote', this._t('field.remote'), { required: true, maxLength: 2048 })
@@ -1108,211 +1325,138 @@ export class LocalScmController {
     }
 
     const status = this._status || { branch: {}, changes: [] };
-    const groups = groupStatusChanges(status.changes);
-    const sections = [];
-    const addTarget = (id, target) => {
-      this._itemTargets.set(id, target);
-      return id;
-    };
-    const repositories = this._repositories.slice(0, MAX_VISIBLE_SECTION_ITEMS).map((repository, index) => {
-      const id = addTarget('repository-' + index, { kind: 'repository', repositoryId: repository.repositoryId });
-      return {
-        id,
-        title: descriptorLabel(repository),
-        description: repository.isWorkspaceRoot ? this._t('activity.title') : undefined,
-        badge: repository.repositoryId === this._activeRepositoryId ? 'active' : undefined,
-        command: this._commands.selectRepository,
-        disabled: repository.repositoryId === this._activeRepositoryId
-      };
-    });
-    if (repositories.length > 1) {
-      sections.push({ id: 'repositories', title: this._t('section.repositories'), items: repositories });
-    }
-
-    const appendChanges = (sectionId, title, entries, command, showLoadMore) => {
-      const items = entries.slice(0, MAX_VISIBLE_SECTION_ITEMS).map((entry, index) => {
-        const id = addTarget(sectionId + '-' + index, { kind: 'change', path: entry.path, side: sectionId, fileKind: entry.kind });
-        return {
-          id,
-          title: displayText(entry.path, 256, '-'),
-          description: entry.originalPath ? displayText(entry.originalPath, 512, '-') : undefined,
-          // The status badge remains host-owned; line totals are included only
-          // when the local broker can establish them for this exact side.
-          meta: entry.lineStats
-            ? '+' + entry.lineStats.additions + ' -' + entry.lineStats.deletions
-            : entry.code,
-          badge: this._t('status.' + entry.status),
-          command: this._enhancedView ? this._commands.viewDiff : command,
-          ...(this._enhancedView ? { secondaryAction: { command, title: this._t(sectionId === 'staged' ? 'action.unstage' : 'action.stage'), icon: sectionId === 'staged' ? 'remove' : 'add' } } : {}),
-          disabled: this._phase === LocalScmPhase.LOADING
-        };
-      });
-      sections.push({
-        id: sectionId,
-        title,
-        items,
-        loadMore: showLoadMore ? { command: this._commands.loadMoreChanges, label: this._t('action.loadMore') } : undefined
-      });
-    };
-    const count = (entries) => ' · ' + entries.length + (this._statusHasMore ? '+' : '');
-    appendChanges('staged', this._t('group.staged') + count(groups.staged), groups.staged, this._commands.unstage, false);
-    appendChanges('unstaged', this._t('group.unstaged') + count(groups.unstaged), groups.unstaged, this._commands.stage, false);
-    appendChanges('untracked', this._t('group.untracked') + count(groups.untracked), groups.untracked, this._commands.stage, false);
-    appendChanges('conflicted', this._t('group.conflicted') + count(groups.conflicted), groups.conflicted, this._commands.stage, this._canLoadMoreChanges());
-
-    const localBranches = Array.isArray(this._branches && this._branches.local) ? this._branches.local : [];
-    const branchItems = localBranches.filter((branch) => plainObject(branch) && typeof branch.name === 'string' && branch.name.trim())
-      .slice(0, MAX_VISIBLE_SECTION_ITEMS).map((branch, index) => {
-      const id = addTarget('branch-' + index, { kind: 'branch', name: branch.name });
-      return {
-        id,
-        title: displayText(branch.name, 256, '-'),
-        description: branch.upstream ? displayText(branch.upstream, 512, '-') : undefined,
-        meta: branch.hash ? displayText(branch.hash, 160, '-') : undefined,
-        badge: branch.name === (this._branches && this._branches.current) ? 'current' : undefined,
-        command: this._commands.checkout,
-        disabled: branch.name === (this._branches && this._branches.current)
-      };
-    });
-    const remoteBranches = Array.isArray(this._branches && this._branches.remote) ? this._branches.remote : [];
-    for (const branch of remoteBranches) {
-      if (branchItems.length >= MAX_VISIBLE_SECTION_ITEMS) break;
-      if (!plainObject(branch) || typeof branch.name !== 'string' || !branch.name.trim()) continue;
-      branchItems.push({ id: 'remote-branch-' + branchItems.length, title: displayText(branch.name, 256), description: this._t('label.remoteBranch'), meta: branch.hash ? displayText(branch.hash, 160) : undefined });
-    }
-    sections.push({ id: 'branches', title: this._t('section.branches'), items: branchItems, collapsed: true });
-
-    const remoteItems = (Array.isArray(this._remotes && this._remotes.remotes) ? this._remotes.remotes : []).slice(0, MAX_VISIBLE_SECTION_ITEMS).map((entry, index) => ({
-      id: 'remote-' + index,
-      title: displayText(entry.name, 256, '-'),
-      description: displayText(entry.urls && entry.urls[0], 512, this._t('state.remoteUnavailable.title')),
-      meta: entry.pushUrls && entry.pushUrls[0] && entry.pushUrls[0] !== (entry.urls && entry.urls[0]) ? displayText(entry.pushUrls[0], 160, '-') : undefined
-    }));
-    sections.push({ id: 'remotes', title: this._t('section.remotes'), items: remoteItems, emptyMessage: this._t('state.noRemote'), collapsed: true });
-
-    const historyItems = this._history.slice(0, MAX_VISIBLE_SECTION_ITEMS).map((commit, index) => {
-      const title = typeof commit.subject === 'string' && commit.subject.trim()
-        ? displayText(commit.subject, 256, '-')
-        : typeof commit.hash === 'string' && commit.hash
-          ? displayText(commit.hash, 256, '-')
-          : this._t('group.history');
-      return {
-        id: 'history-' + index,
-        title,
-        description: commit.author && typeof commit.author.name === 'string' && commit.author.name
-          ? displayText(commit.author.name, 512, '-')
-          : undefined,
-        meta: typeof commit.hash === 'string' && commit.hash ? displayText(commit.hash, 160, '-').slice(0, 12) : undefined
-      };
-    });
-    sections.push({
-      id: 'history',
-      title: this._t('group.history'),
-      items: historyItems,
-      collapsed: true,
-      loadMore: this._canLoadMoreHistory()
-        ? { command: this._commands.loadMoreHistory, label: this._t('action.loadMore') }
-        : undefined
-    });
-
     const branch = status.branch || {};
-    const remote = Array.isArray(this._remotes && this._remotes.remotes) && this._remotes.remotes[0];
-    const isUnborn = branch.oid === '(initial)';
-    const publishAction = action('publish', this._t('action.publish'), this._commands.publish, {
-      kind: 'primary',
-      placement: isUnborn ? 'button' : 'menu',
-      icon: 'publish',
-      form: form(this._t('form.publish.title'), this._t('action.publish'), [
-        textField('remote', this._t('field.remote'), { required: true, maxLength: 2048 }),
-        textField('branch', this._t('field.branch'), { required: true, value: branch.head || 'main', maxLength: 120 }),
-        textField('message', this._t('field.initialCommitMessage'), { type: 'textarea', required: true, value: this._t('field.initialCommitDefault'), maxLength: 4096 })
-      ])
-    });
-    const commitAction = action('commit', this._t('action.commit'), this._commands.commit, {
-      kind: 'primary', placement: this._enhancedView ? 'inline' : 'toolbar', icon: 'commit',
-      form: form(this._t('form.commit.title'), this._t('action.commit'), [
-        textField('message', this._t('field.commitMessage'), { type: 'textarea', required: true, maxLength: 4096 })
-      ])
-    });
-    const readyActions = isUnborn
-      ? [
-        action('refresh', this._t('action.refresh'), this._commands.refresh, { placement: 'toolbar', icon: 'refresh' }),
-        action('stageAll', this._t('action.stageAll'), this._commands.stageAll, { placement: 'toolbar', icon: 'stage-all' }),
-        commitAction,
-        publishAction,
-        action('toggleDecorations', this._t(this._decorationsEnabled ? 'action.hideDecorations' : 'action.showDecorations'), this._commands.toggleDecorations, { placement: 'menu', icon: 'visibility' }),
-        action('setRemote', this._t('action.setRemote'), this._commands.setRemote, { placement: 'menu', icon: 'remote', form: form(this._t('form.setRemote.title'), this._t('action.setRemote'), [textField('name', this._t('field.remoteName'), { required: true, value: 'origin', maxLength: 64 }), textField('url', this._t('field.remote'), { required: true, maxLength: 2048 })]) }),
-        action('createBranch', this._t('action.createBranch'), this._commands.createBranch, {
-          placement: 'menu', icon: 'branch',
-          form: form(this._t('form.createBranch.title'), this._t('action.createBranch'), [
-            textField('name', this._t('field.branch'), { required: true, maxLength: 120 }),
-            checkboxField('checkout', this._t('field.checkoutAfterCreate'), true)
-          ])
-        })
-      ]
-      : [
-        action('refresh', this._t('action.refresh'), this._commands.refresh, { placement: 'toolbar', icon: 'refresh' }),
-        action('stageAll', this._t('action.stageAll'), this._commands.stageAll, { placement: 'toolbar', icon: 'stage-all' }),
-        commitAction,
-        action('push', this._t('action.push'), this._commands.push, {
-          placement: 'toolbar', icon: 'push',
-          form: form(this._t('form.push.title'), this._t('action.push'), [
-            textField('remote', this._t('field.remoteName'), { maxLength: 64, placeholder: 'origin' }),
-            textField('branch', this._t('field.localBranch'), { maxLength: 120 }),
-            checkboxField('setUpstream', this._t('field.setUpstream'), !branch.upstream)
-          ])
-        }),
-        action('pull', this._t('action.pull'), this._commands.pull, {
-          placement: 'menu', icon: 'pull',
-          form: form(this._t('form.pull.title'), this._t('action.pull'), [
-            textField('remote', this._t('field.remoteName'), { maxLength: 64, placeholder: 'origin' }),
-            textField('branch', this._t('field.remoteBranch'), { maxLength: 120 })
-          ])
-        }),
-        action('toggleDecorations', this._t(this._decorationsEnabled ? 'action.hideDecorations' : 'action.showDecorations'), this._commands.toggleDecorations, { placement: 'menu', icon: 'visibility' }),
-        action('setRemote', this._t('action.setRemote'), this._commands.setRemote, { placement: 'menu', icon: 'remote', form: form(this._t('form.setRemote.title'), this._t('action.setRemote'), [textField('name', this._t('field.remoteName'), { required: true, value: 'origin', maxLength: 64 }), textField('url', this._t('field.remote'), { required: true, maxLength: 2048 })]) }),
-        action('fetch', this._t('action.fetch'), this._commands.fetch, { placement: 'menu', icon: 'pull', form: form(this._t('form.fetch.title'), this._t('action.fetch'), [textField('remote', this._t('field.remoteName'), { maxLength: 64, placeholder: 'origin' })]) }),
-        action('checkout', this._t('action.checkout'), this._commands.checkout, { placement: 'menu', icon: 'branch', form: form(this._t('form.checkout.title'), this._t('action.checkout'), [textField('branch', this._t('field.branch'), { required: true, maxLength: 120 })]) }),
-        action('createBranch', this._t('action.createBranch'), this._commands.createBranch, { placement: 'menu', icon: 'branch', form: form(this._t('form.createBranch.title'), this._t('action.createBranch'), [textField('name', this._t('field.branch'), { required: true, maxLength: 120 }), checkboxField('checkout', this._t('field.checkoutAfterCreate'), true)]) }),
-        action('deleteBranch', this._t('action.deleteBranch'), this._commands.deleteBranch, {
-          kind: 'danger',
-          placement: 'menu',
-          icon: 'branch',
-          form: form(this._t('form.deleteBranch.title'), this._t('action.deleteBranch'), [
-            textField('name', this._t('field.branch'), { required: true, maxLength: 120 })
-          ])
-        })
+    const groups = groupStatusChanges(status.changes);
+    const loading = this._phase === LocalScmPhase.LOADING;
+    const remotes = (Array.isArray(this._remotes?.remotes) ? this._remotes.remotes : [])
+      .filter((remote) => plainObject(remote) && typeof remote.name === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(remote.name)).slice(0, 64);
+    if (!remotes.some((remote) => remote.name === this._viewRemote)) this._viewRemote = remotes[0]?.name || '';
+    const target = (id, value) => { this._itemTargets.set(id, value); return id; };
+    const usedNames = new Set(remotes.map((remote) => remote.name));
+    let nextName = usedNames.has('origin') ? 'remote2' : 'origin';
+    for (let index = 2; usedNames.has(nextName); index += 1) nextName = 'remote' + (index + 1);
+    const remoteForm = (entry) => {
+      const presentation = entry ? remotePresentation(entry) : null;
+      const fields = [
+        textField('label', this._t('field.cardName'), { required: true, value: presentation?.title, maxLength: 96 }),
+        textField('platform', this._t('field.platform'), { required: true, value: presentation?.platform, placeholder: 'GitHub / GitLab / Gitee', maxLength: 64 }),
+        textField('url', this._t('field.remote'), { required: !entry, placeholder: entry ? this._t('field.keepAddress') : 'https://…', description: entry?.urls?.[0] ? this._t('field.currentAddress') + ': ' + displayText(entry.urls[0], 450) : undefined, maxLength: 2048 })
       ];
-    return {
-      phase: this._phase === LocalScmPhase.LOADING ? 'loading' : 'ready',
-      title: this._t('activity.title'),
-      message: this._phase === LocalScmPhase.LOADING
-        ? this._t(this._operation ? 'operation.' + this._operation : 'state.loading')
-        : this._error
-        ? (this._error.partialPublish ? this._t('state.publishPartial') + ' ' : '') + this._t(this._errorContent(this._error.kind || 'operationFailed')[1])
-        : this._notice
-        ? this._t(this._notice)
-        : isUnborn
-        ? this._t('state.unborn.message')
-        : undefined,
-      ...(this._enhancedView && this._detail ? { detail: this._detail } : {}),
-      ...(this._enhancedView && this._notice && this._phase === LocalScmPhase.READY ? {
-        completedAction: ({ 'notice.committed': 'commit', 'notice.published': 'publish', 'notice.cloned': 'clone', 'notice.fetchComplete': 'fetch', 'notice.pullComplete': 'pull', 'notice.pushComplete': 'push', 'notice.pushUpToDate': 'push', 'notice.remoteSaved': 'setRemote' })[this._notice]
-      } : {}),
-      summary: {
-        title: this._t('state.ready'),
-        items: [
-          { label: this._t('summary.branch'), value: displayText(branch.head, 256, '-') },
-          { label: this._t('summary.remote'), value: displayText(remote && remote.urls && remote.urls[0], 256, '-') },
-          { label: this._t('summary.upstream'), value: displayText(branch.upstream, 256, '-') },
-          { label: this._t('summary.ahead'), value: branch.upstream ? String(Number.isInteger(branch.ahead) ? branch.ahead : 0) : '-' },
-          { label: this._t('summary.behind'), value: branch.upstream ? String(Number.isInteger(branch.behind) ? branch.behind : 0) : '-' }
+      if (!entry) fields.push(textField('name', this._t('field.remoteName'), { required: true, value: nextName, maxLength: 64 }));
+      return form(this._t(entry ? 'form.editRemote' : 'form.addRemote'), this._t(entry ? 'action.saveRemote' : 'action.addRemote'), fields);
+    };
+    const cards = remotes.map((remote) => {
+      const info = remotePresentation(remote);
+      const id = target('remote-' + remote.name, { kind: 'remote', name: remote.name });
+      const removeField = { ...checkboxField('confirm', this._t('field.confirmRemove')), description: this._t('field.removeRemoteDescription') };
+      return {
+        id,
+        title: displayText(info.title, 96, remote.name),
+        subtitle: displayText(info.platform, 96, 'Git'),
+        description: displayText(info.name, 160, remote.name),
+        selected: this._page === 'history' ? remote.name === this._viewRemote : remote.selected === true,
+        command: this._commands.selectRemote,
+        disabled: loading,
+        actions: [
+          action('editRemote', this._t('action.editRemote'), this._commands.configureRemote, { form: remoteForm(remote) }),
+          action('removeRemote', this._t('action.removeRemote'), this._commands.removeRemote, { kind: 'danger', form: form(this._t('form.removeRemote'), this._t('action.removeRemote'), [removeField]) })
         ]
-      },
+      };
+    });
+    const dashboard = {
+      title: this._t('dashboard.remotes'),
+      selectionMode: this._page === 'history' ? 'single' : 'multiple',
+      items: cards,
+      addAction: action('addRemote', this._t('action.addRemote'), this._commands.configureRemote, { form: remoteForm(null), disabled: loading }),
+      tabs: { active: this._page, items: [
+        { id: 'changes', title: this._t('page.changes'), command: this._commands.selectPage },
+        { id: 'history', title: this._t('page.history'), command: this._commands.selectPage }
+      ] }
+    };
+    const sections = [];
+    if (this._repositories.length > 1) {
+      sections.push({ id: 'repositories', title: this._t('section.repositories'), collapsed: true, items: this._repositories.slice(0, 64).map((repository, index) => ({
+        id: target('repository-' + index, { kind: 'repository', repositoryId: repository.repositoryId }),
+        title: descriptorLabel(repository), command: this._commands.selectRepository,
+        disabled: loading || repository.repositoryId === this._activeRepositoryId
+      })) });
+    }
+    if (this._page === 'changes') {
+      if (this._pushResults.length) {
+        sections.push({ id: 'results', title: this._t('section.pushResults'), items: this._pushResults.map((result, index) => ({
+          id: 'result-' + index,
+          title: displayText(result.target.label, 256, result.target.name),
+          description: result.code ? this._t(this._errorContent(classifyScmError({ code: result.code }, 'push'))[1]) : undefined,
+          badge: this._t('pushStatus.' + result.status)
+        })) });
+      }
+      const appendChanges = (id, title, entries, command, more) => {
+        sections.push({ id, title: title + ' · ' + entries.length + (this._statusHasMore ? '+' : ''),
+          items: entries.slice(0, MAX_VISIBLE_SECTION_ITEMS).map((entry, index) => ({
+            id: target(id + '-' + index, { kind: 'change', path: entry.path, side: id, fileKind: entry.kind }),
+            title: displayText(entry.path, 256),
+            description: entry.originalPath ? displayText(entry.originalPath, 512) : undefined,
+            meta: entry.lineStats ? '+' + entry.lineStats.additions + ' -' + entry.lineStats.deletions : entry.code,
+            badge: this._t('status.' + entry.status), command: this._commands.viewDiff,
+            secondaryAction: { command, title: this._t(id === 'staged' ? 'action.unstage' : 'action.stage'), icon: id === 'staged' ? 'remove' : 'add' },
+            disabled: loading
+          })),
+          loadMore: more ? { command: this._commands.loadMoreChanges, label: this._t('action.loadMore') } : undefined
+        });
+      };
+      if (groups.conflicted.length) appendChanges('conflicted', this._t('group.conflicted'), groups.conflicted, this._commands.stage, false);
+      appendChanges('staged', this._t('group.staged'), groups.staged, this._commands.unstage, false);
+      appendChanges('unstaged', this._t('group.unstaged'), groups.unstaged, this._commands.stage, false);
+      appendChanges('untracked', this._t('group.untracked'), groups.untracked, this._commands.stage, this._canLoadMoreChanges());
+    } else {
+      const branchItems = (Array.isArray(this._branches?.remote) ? this._branches.remote : [])
+        .filter((item) => plainObject(item) && typeof item.name === 'string' && (!this._viewRemote || item.name.startsWith(this._viewRemote + '/')))
+        .slice(0, MAX_VISIBLE_SECTION_ITEMS).map((item, index) => ({ id: 'remote-branch-' + index, title: displayText(item.name, 256), meta: item.hash ? displayText(item.hash, 160).slice(0, 12) : undefined }));
+      sections.push({ id: 'branches', title: this._t('section.branches'), items: branchItems, emptyMessage: this._t('history.noBranches') });
+      const graph = buildCommitGraph(this._history);
+      sections.push({ id: 'history', title: this._t('group.history'), description: this._t(this._viewRemote ? 'history.fetched' : 'history.local'),
+        emptyMessage: this._t('history.empty'),
+        items: this._history.slice(0, MAX_VISIBLE_SECTION_ITEMS).map((commit, index) => ({
+          id: 'history-' + index,
+          title: displayText(commit.subject || commit.hash, 256),
+          description: [commit.author?.name, typeof commit.date === 'string' ? commit.date.slice(0, 10) : ''].filter(Boolean).join(' · ') || undefined,
+          meta: typeof commit.hash === 'string' ? commit.hash.slice(0, 12) : undefined,
+          graph: graph[index]
+        })),
+        loadMore: this._canLoadMoreHistory() ? { command: this._commands.loadMoreHistory, label: this._t('action.loadMore') } : undefined
+      });
+    }
+    const selectedCount = remotes.filter((remote) => remote.selected === true).length;
+    const commitForm = form(this._t('form.commit.title'), this._t('action.commit'), [textField('message', this._t('field.commitMessage'), { type: 'textarea', required: true, maxLength: 4096 })]);
+    commitForm.secondarySubmit = { id: 'commitAndPush', title: this._t('action.commitAndPush') + ' (' + selectedCount + ')', command: this._commands.commitAndPush, disabled: !selectedCount };
+    const actions = [action('refresh', this._t('action.refresh'), this._commands.refresh, { placement: 'toolbar', icon: 'refresh' })];
+    if (this._page === 'changes') {
+      actions.push(action('stageAll', this._t('action.stageAll'), this._commands.stageAll, { placement: 'toolbar', icon: 'stage-all' }));
+      actions.push(action('pushSelected', this._t('action.pushSelected'), this._commands.pushSelected, { placement: 'toolbar', icon: 'push', disabled: !selectedCount || branch.oid === '(initial)' }));
+      actions.push(action('commit', this._t('action.commit'), this._commands.commit, { kind: 'primary', placement: 'inline', icon: 'commit', form: commitForm }));
+      if (this._pushResults.some((result) => result.status === 'failed')) actions.push(action('retryPush', this._t('action.retryPush'), this._commands.retryPush));
+    } else {
+      actions.push(action('fetchSelected', this._t('action.fetchSelected'), this._commands.fetchSelected, { placement: 'toolbar', icon: 'pull', disabled: !this._viewRemote }));
+      actions.push(action('pull', this._t('action.pull'), this._commands.pull, { placement: 'menu', icon: 'pull', form: form(this._t('form.pull.title'), this._t('action.pull'), [textField('remote', this._t('field.remoteName'), { required: true, value: this._viewRemote || undefined, description: this._t('field.pullDescription'), maxLength: 64 }), textField('branch', this._t('field.remoteBranch'), { maxLength: 120 })]) }));
+      actions.push(action('createBranch', this._t('action.createBranch'), this._commands.createBranch, { placement: 'menu', icon: 'branch', form: form(this._t('form.createBranch.title'), this._t('action.createBranch'), [textField('name', this._t('field.branch'), { required: true, maxLength: 120 }), checkboxField('checkout', this._t('field.checkoutAfterCreate'), true)]) }));
+      actions.push(action('checkout', this._t('action.checkout'), this._commands.checkout, { placement: 'menu', icon: 'branch', form: form(this._t('form.checkout.title'), this._t('action.checkout'), [textField('branch', this._t('field.branch'), { required: true, maxLength: 120 })]) }));
+      actions.push(action('deleteBranch', this._t('action.deleteBranch'), this._commands.deleteBranch, { placement: 'menu', icon: 'branch', kind: 'danger', form: form(this._t('form.deleteBranch.title'), this._t('action.deleteBranch'), [textField('name', this._t('field.branch'), { required: true, maxLength: 120 })]) }));
+    }
+    actions.push(action('toggleDecorations', this._t(this._decorationsEnabled ? 'action.hideDecorations' : 'action.showDecorations'), this._commands.toggleDecorations, { placement: 'menu', icon: 'visibility' }));
+    const completed = this._completedAction || (this._notice === 'notice.committed' ? 'commit' : '');
+    return {
+      phase: loading ? 'loading' : 'ready', title: this._t('activity.title'), dashboard,
+      message: loading ? this._t(this._operation ? 'operation.' + this._operation : 'state.loading')
+        : this._error ? (this._error.partialPublish ? this._t('state.publishPartial') + ' ' : '') + this._t(this._errorContent(this._error.kind || 'operationFailed')[1])
+        : this._notice ? this._t(this._notice) : branch.oid === '(initial)' ? this._t('state.unborn.message') : undefined,
+      ...(this._detail ? { detail: this._detail } : {}),
+      ...(completed && !loading ? { completedAction: completed } : {}),
+      summary: { items: [{ label: this._t('summary.branch'), value: displayText(branch.head, 256) }, { label: this._t('summary.upstream'), value: displayText(branch.upstream, 256) }] },
       sections,
-      actions: this._phase === LocalScmPhase.LOADING ? readyActions.map((item) => ({ ...item, disabled: true })) : readyActions
+      actions: loading ? actions.map((item) => ({ ...item, disabled: true })) : actions
     };
   }
+
 
   async _emit() {
     if (this._disposed) return;
