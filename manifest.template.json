@@ -3,9 +3,9 @@
   "id": "bobocloud.local-scm",
   "displayName": "BOBOCloud Local Source Control",
   "description": "Official local-workspace source-control integration. It does not inspect or modify cloud workspaces.",
-  "version": "3.0.2",
+  "version": "3.0.3",
   "engines": {
-    "bobocloud": ">=2.6.0 <3.0.0",
+    "bobocloud": ">=2.6.0 <5.0.0",
     "pluginApi": ">=1.12.0 <2.0.0"
   },
   "main": "dist/extension.js",
